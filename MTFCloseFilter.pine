@@ -1,0 +1,237 @@
+// =============================================================================
+// MTF OTF Close Filter  —  TradingView Pine Script v5
+// =============================================================================
+//
+// STATUS BAR + TRANSPARENT BACKGROUND
+//   • A six-cell table (bottom of chart) shows the current OTF Close Filter
+//     state for six timeframes: 1m · 2m · 5m · 30m · 60m · 120m
+//   • An optional transparent background tints the chart bar based on
+//     overall MTF alignment.
+//
+// OTF CLOSE FILTER RULES
+// ──────────────────────
+// Each bar: compare current close against the highest and lowest close over
+// the previous N bars.  Window = [bar-1 … bar-N]  (current bar excluded;
+// wicks never trigger a state change — close prices only).
+//
+//   Mode 0 — Breakout (strict)
+//     UP      : close > highest close of prev-N bars
+//     DOWN    : close < lowest  close of prev-N bars
+//     Neutral : inside the range
+//
+//   Mode 1 — Continuation (lenient)
+//     Same thresholds as Mode 0; produces identical zones.
+//
+//   Mode 2 — Stateful  (no neutral once established)
+//     Breakout flips state to UP / DOWN.
+//     Close inside the range → carry the prior state forward.
+//     Neutral only at the very start, before the first breakout.
+//
+//   Output: +1 = Up · -1 = Down · 0 = Neutral
+//
+// TUNING N
+// ────────
+//   N = 1      compare to the previous close; most reactive
+//   N = 3–5    tolerates brief pullbacks
+//   N = 8–12   higher-timeframe smoothness
+//   N = 15+    structural; breaks only on genuine trend changes
+//
+// TRANSPARENT BACKGROUND
+// ──────────────────────
+//   "Show background tint" overlays a semi-transparent color on each bar:
+//     All 6 TFs UP   → green tint
+//     All 6 TFs DOWN → red tint
+//     Mixed / Neutral → no tint  (keeps the chart clean)
+//   Transparency is user-adjustable (0 = solid, 100 = invisible).
+// =============================================================================
+
+//@version=5
+indicator("MTF OTF Close Filter", overlay = true, max_bars_back = 500)
+
+// ── Input groups ──────────────────────────────────────────────────────────────
+var string G_FILTER  = "OTF Close Filter"
+var string G_DISPLAY = "Display"
+var string G_COLORS  = "Colors"
+
+// ── Filter settings ───────────────────────────────────────────────────────────
+mode = input.int(2,
+     "Mode  (0 Breakout · 1 Continuation · 2 Stateful)",
+     minval = 0, maxval = 2, group = G_FILTER,
+     tooltip =
+       "Mode 0 / 1  —  UP/DOWN only on a strict breakout beyond the N-bar\n" +
+       "             close range; Neutral when inside.\n" +
+       "Mode 2      —  same breakout thresholds, but inside the range the\n" +
+       "             previous state is carried forward (no neutral once\n" +
+       "             a state has been established).")
+
+n_ltf   = input.int(3,  "N lookback  ·  1m / 2m / 5m",    minval = 1, maxval = 500, group = G_FILTER)
+n_htf   = input.int(5,  "N lookback  ·  30m / 60m / 120m", minval = 1, maxval = 500, group = G_FILTER)
+n_chart  = input.int(3,  "N lookback  ·  chart interval (background only)",
+     minval = 1, maxval = 500, group = G_FILTER,
+     tooltip = "Used for the background tint when the chart is set to a timeframe\n" +
+               "other than the six monitored TFs (1m · 2m · 5m · 30m · 60m · 120m).")
+bal_bars = input.int(3,  "Balance bars  ·  consecutive inside closes",
+     minval = 1, maxval = 50, group = G_FILTER,
+     tooltip = "Mode 2 only. After this many consecutive closes inside the N-bar\n" +
+               "range, the state is overridden to Neutral (balance zone).\n" +
+               "A breakout in either direction resets the counter and restores trend state.")
+
+// ── Display settings ──────────────────────────────────────────────────────────
+tbl_pos_str = input.string("Bottom Right", "Table position",
+     options  = ["Bottom Right", "Bottom Left", "Bottom Center",
+                 "Middle Right", "Middle Left"],
+     group    = G_DISPLAY)
+
+txt_sz_str = input.string("Small", "Text size",
+     options = ["Tiny", "Small", "Normal", "Large", "Huge"],
+     group   = G_DISPLAY)
+
+show_bg   = input.bool(true,  "Show transparent background tint", group = G_DISPLAY,
+     tooltip =
+       "Tints each chart bar based on the current chart's timeframe state.\n" +
+       "Mode 2 (Stateful): always green or red once a state is established.\n" +
+       "Mode 0 / 1: green/red only on a strict breakout; transparent when inside range.\n" +
+       "If the chart TF is not one of the 6 monitored TFs, the majority vote is used.")
+bg_transp = input.int(88, "Tint transparency  (0 = opaque  ·  100 = invisible)",
+     minval = 0, maxval = 99, group = G_DISPLAY)
+
+// ── Color settings ────────────────────────────────────────────────────────────
+c_up   = input.color(color.new(#00C850, 0),  "UP",                   group = G_COLORS)
+c_dn   = input.color(color.new(#C83232, 0),  "DOWN",                 group = G_COLORS)
+c_neut = input.color(color.new(#5A5A5A, 0),  "Neutral",              group = G_COLORS)
+c_bg   = input.color(color.new(#121212, 75), "Status bar background", group = G_COLORS)
+c_txt  = input.color(color.white,            "Label text",            group = G_COLORS)
+
+// =============================================================================
+// OTF CLOSE FILTER  —  evaluated inside request.security() context
+//
+// ta.highest(close, N)[1]  gives the highest close over the N bars
+// immediately BEFORE the current bar  ([bar-1 … bar-N]). ✓
+//
+// var int st  maintains its value across bars of the requested timeframe,
+// which is exactly the carry-forward behaviour Mode 2 requires.
+// =============================================================================
+f_otf(N, md, bal) =>
+    hi = ta.highest(close, N)[1]
+    lo = ta.lowest (close, N)[1]
+    var int st           = 0
+    var int inside_count = 0
+    if close > hi
+        st           := 1
+        inside_count := 0
+    else if close < lo
+        st           := -1
+        inside_count := 0
+    else if md < 2
+        st := 0          // Modes 0 & 1: explicit neutral when inside range
+    else
+        inside_count := inside_count + 1   // Mode 2: accumulate inside bars
+    // Mode 2 balance override: enough consecutive inside closes → neutral
+    if md == 2 and inside_count >= bal
+        0
+    else
+        st
+
+// =============================================================================
+// REQUEST MTF STATES
+// Each call runs f_otf in the context of that timeframe's price data.
+// lookahead_off: on the live bar you see the last *confirmed* TF close
+//               (non-repainting).  Change to lookahead_on if you prefer
+//               to track the current forming bar at each TF.
+// =============================================================================
+s1m     = request.security(syminfo.tickerid, "1",               f_otf(n_ltf,   mode, bal_bars), lookahead = barmerge.lookahead_off)
+s2m     = request.security(syminfo.tickerid, "2",               f_otf(n_ltf,   mode, bal_bars), lookahead = barmerge.lookahead_off)
+s5m     = request.security(syminfo.tickerid, "5",               f_otf(n_ltf,   mode, bal_bars), lookahead = barmerge.lookahead_off)
+s30m    = request.security(syminfo.tickerid, "30",              f_otf(n_htf,   mode, bal_bars), lookahead = barmerge.lookahead_off)
+s60m    = request.security(syminfo.tickerid, "60",              f_otf(n_htf,   mode, bal_bars), lookahead = barmerge.lookahead_off)
+s120m   = request.security(syminfo.tickerid, "120",             f_otf(n_htf,   mode, bal_bars), lookahead = barmerge.lookahead_off)
+s_chart = request.security(syminfo.tickerid, timeframe.period,  f_otf(n_chart, mode, bal_bars), lookahead = barmerge.lookahead_off)
+
+// =============================================================================
+// TRANSPARENT BACKGROUND TINT
+// Tints based on the state of the CURRENT CHART'S timeframe so the background
+// adapts automatically when you switch between chart TFs.
+//
+//   Mode 2 (Stateful)  → always green or red  (no neutral once established)
+//   Mode 0 / 1         → green / red only on a strict breakout; transparent
+//                        when inside the N-bar close range
+//
+// If the chart is set to a timeframe other than the six monitored TFs,
+// s_chart runs f_otf against that exact TF using n_chart as its N.
+// =============================================================================
+total = s1m + s2m + s5m + s30m + s60m + s120m
+
+// Resolve the state that matches the open chart's timeframe
+chart_state = if timeframe.period == "1"
+    s1m
+else if timeframe.period == "2"
+    s2m
+else if timeframe.period == "5"
+    s5m
+else if timeframe.period == "30"
+    s30m
+else if timeframe.period == "60"
+    s60m
+else if timeframe.period == "120"
+    s120m
+else
+    s_chart  // unmatched TF: proper OTF state computed with n_chart
+
+tint_color = if show_bg
+    if chart_state == 1
+        color.new(c_up, bg_transp)
+    else if chart_state == -1
+        color.new(c_dn, bg_transp)
+    else
+        na                  // neutral (only possible in Modes 0 & 1)
+else
+    na
+
+bgcolor(tint_color, title = "MTF alignment tint")
+
+// =============================================================================
+// STATUS BAR TABLE
+// =============================================================================
+
+// -- Resolve position constant ------------------------------------------------
+tbl_pos = switch tbl_pos_str
+    "Bottom Right"  => position.bottom_right
+    "Bottom Left"   => position.bottom_left
+    "Bottom Center" => position.bottom_center
+    "Middle Right"  => position.middle_right
+    "Middle Left"   => position.middle_left
+    => position.bottom_right
+
+// -- Resolve text-size constant -----------------------------------------------
+txt_sz = switch txt_sz_str
+    "Tiny"   => size.tiny
+    "Small"  => size.small
+    "Normal" => size.normal
+    "Large"  => size.large
+    "Huge"   => size.huge
+    => size.small
+
+// -- Create the table once (6 TF columns × 1 row) ----------------------------
+//    Row 0: colored state cells with TF labels
+var table tbl = table.new(
+     position     = tbl_pos,
+     columns      = 6,
+     rows         = 1,
+     bgcolor      = c_bg,
+     border_width = 1,
+     border_color = color.new(color.gray, 65),
+     frame_width  = 1,
+     frame_color  = color.new(color.gray, 50))
+
+// -- Helper: map state int to fill color (must be at script scope) ------------
+state_color(st) =>
+    st == 1 ? c_up : st == -1 ? c_dn : c_neut
+
+// -- Fill cells on every confirmed last bar -----------------------------------
+if barstate.islast
+    table.cell(tbl, 0, 0, " 1m ",   bgcolor = state_color(s1m),   text_color = c_txt, text_size = txt_sz)
+    table.cell(tbl, 1, 0, " 2m ",   bgcolor = state_color(s2m),   text_color = c_txt, text_size = txt_sz)
+    table.cell(tbl, 2, 0, " 5m ",   bgcolor = state_color(s5m),   text_color = c_txt, text_size = txt_sz)
+    table.cell(tbl, 3, 0, " 30m ",  bgcolor = state_color(s30m),  text_color = c_txt, text_size = txt_sz)
+    table.cell(tbl, 4, 0, " 60m ",  bgcolor = state_color(s60m),  text_color = c_txt, text_size = txt_sz)
+    table.cell(tbl, 5, 0, " 120m ", bgcolor = state_color(s120m), text_color = c_txt, text_size = txt_sz)
