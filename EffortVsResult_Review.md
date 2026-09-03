@@ -383,3 +383,51 @@ All findings were valid. No BLOCKERs existed. Disposition:
 - MEDIUM-5 FIXED — fingerprint moved above VAP guard; VAP-null intrabar early-out + BARS update.
 - LOW-1 FIXED — maxNorm packing x1000, quantum documented. LOW-2 FIXED via sign-gated scan. LOW-3 documented in code (no-action). LOW-4 no-action (noted). LOW-5 addressed (DrawZeros split + color-history behavior in spec).
 - No invalid findings to dispute. No existing studies modified.
+
+---
+
+## Header Audit (2026-09-03, compile-API audit vs Zander headers)
+
+Scope: every ACSIL method, enum/drawing constant, struct field, overload,
+and argument type used by `EffortVsResult.cpp` (830 lines, commit `66aa8f7`)
+checked against `sierrachart_zander.h`, `scstructures_zander.h`,
+`scconstants_zander.h`. No generic/web API names trusted over these headers.
+No source or spec change required — verdict: CLEAN, zero incompatibilities.
+
+| Symbol used | Verified header symbol | Verdict |
+|---|---|---|
+| `SCDLLName`, `SCSFExport` | `scstructures_zander.h:119-122` macros | exact |
+| `SCStudyInterfaceRef`, `SCInputRef`, `SCSubgraphRef` | `scstructures_zander.h:113, 2050, 3109` typedefs | exact |
+| `sc.SetDefaults/GraphName/StudyDescription` (`SCString`) | `sierrachart_zander.h` `SetDefaults`, `GraphName`, `StudyDescription` fields | exact, `=` from `const char*` per house precedent |
+| `sc.AutoLoop` / `sc.GraphRegion` | `sierrachart_zander.h:2556` / `:2445` `int` fields | exact (`0`/`1`) |
+| `sc.DrawZeros`, `sc.MaintainVolumeAtPriceData` | `sierrachart_zander.h` `DrawZeros`, `:2874` `int` fields | exact |
+| `SG.Name/DrawStyle(uint16_t)/LineWidth(uint16_t)/PrimaryColor(uint32)/DrawZeros(int)` | `scstructures_zander.h:1979-2004` `s_SCSubgraph_260` | exact |
+| `DRAWSTYLE_LINE/BAR/POINT/ARROW_UP/ARROW_DOWN` | `scconstants_zander.h:343-352` enum | exact |
+| `DRAWSTYLE_LINE_SKIPZEROS` | `scconstants_zander.h:515` `#define` alias of `DRAWSTYLE_LINE_SKIP_ZEROS`; same alias in `FlowConviction.cpp:274` | exact |
+| `SG[i]=float`, `SG.DataColor[i]=COLORREF` | `s_SCSubgraph_260::operator[](int)->float&`, `DataColor: SCColorArray` | exact (`t_ChartArrayDataType==float`) |
+| `SetInt/SetIntLimits/SetFloat/SetFloatLimits` | `scstructures_zander.h` `s_SCInput_145` bodies | exact signatures |
+| `SetCustomInputStrings(const char*)` + `SetCustomInputIndex(unsigned int)` | `scstructures_zander.h:2916, 3092` | exact (`"a;b;c"` literal, `0`) |
+| `SetYesNo/SetColor/SetAlertSoundNumber` | `scstructures_zander.h:2740, 2858, 2870` | exact |
+| `GetInt/GetFloat/GetIndex/GetYesNo/GetColor` | `scstructures_zander.h:2142, 2198, 2366, 2605, 2426` bodies; `GetInt` handles `ALERT_SOUND_NUMBER_VALUE` | exact; `unsigned->int` narrowing matches `ReconTape.cpp:740`, `FlowConviction.cpp:383` precedent |
+| `In_AlertSound.GetInt()` on alert input | same `GetInt` body + `ReconTape.cpp:856` / `ReconTapeV2.cpp:843` precedent | exact (no need for `GetAlertSoundNumber`) |
+| `sc.VolumeAtPriceForBars` (`c_VAPContainer*`) | `sierrachart_zander.h:3025` | exact; `==nullptr` guard precedented (`TrappedTraders.cpp:283`) |
+| `GetNextHigherVAPElement((unsigned)bar, int&, const s_VolumeAtPriceV2**)` + `AskVolume/BidVolume` int64 math | byte-identical to `TrappedTraders.cpp:409-414`, `LiquidityZones.cpp:233-238` | exact by compiling-baseline precedent (`VAPContainer.h` body not in the 3-file cache; no deviation from proven pattern) |
+| `sc.GetPersistentInt->int&` / `SetPersistentInt(int,int)` | `sierrachart_zander.h:3166-3167` | exact |
+| `sc.GetPersistentPointer->void*&` + `reinterpret_cast<S_EvrState*>` / `SetPersistentPointer(int,void*)` + `nullptr` | `sierrachart_zander.h:3180-3181`; pattern matches `FlowConviction.cpp:367-368,411-418` | exact |
+| `sc.ArraySize/UpdateStartIndex/IsFullRecalculation/LastCallToFunction` (`int`) | `sierrachart_zander.h:2439, 2443, 3223, 2471` | exact |
+| `sc.Open/High/Low/Close` (`SCFloatArray`) | `sierrachart_zander.h:2895+` | exact |
+| `sc.TickSize` (`t_ChartArrayDataType==float`) | `sierrachart_zander.h:2658` | exact |
+| `sc.SetAlert(int,int,const SCString&)` | `sierrachart_zander.h:1624` overload; 2-arg overload at `:1629` unused | exact; anchored to `forming==ArraySize-1` per house pattern |
+| `SCString::Format("%d bar(s) back", int)` | `SCString.h` not in 3-file cache; precedented (`ReconTape.cpp:589,855`, `InterestMap.cpp:717`) same `%d/%.2f` family | precedent-exact, no deviation |
+| `RGB()/COLORREF/max(a,b)/fabsf/memset/INT_MIN` | `windows.h` + `scstructures_zander.h:90-98` `max` macro + `math.h`/`cstring`/`climits` | exact |
+
+Not used / not trusted: `GetMovAvgType`, `UseTool`, `Stochastic`, `MovingAverage`,
+any web-sourced overload — none appear in the source. `s_VolumeAtPriceV2` body
+and `SCString::Format` declaration live in `VAPContainer.h` / `SCString.h`
+(outside the 3-file Zander cache); both call sites are character-identical to
+already-compiling studies, so no residual risk.
+
+Gate: `python3
+/home/ubuntu/.hermes/skills/software-development/acsil-impl-loop/scripts/gate_check.py
+EffortVsResult.cpp` → 12/12 PASS, 830 lines. No source/spec edits; standalone
+`EffortVsResult_HeaderAudit.md` written instead.
