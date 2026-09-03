@@ -114,8 +114,10 @@ All comparisons in integer ticks; `closeTick = round(Close / TickSize)`, etc.
 
 ## 7. Mapped-location confluence (In:14, disabled by default)
 
-- Input type Study-Subgraph via `SetChartStudySubgraphValues(0, 0)` (StudyID 0 =
-  disabled), per the task. If the target SC version does not expose that
+- Input type Study-Subgraph via `SetChartStudySubgraphValues(0, 0, 0)` (StudyID 0 =
+  disabled), per the task; the exact SC_DLL_VERSION 2927 header declares the
+  3-arg Chart/Study/Subgraph form, so the 2-arg call does not compile.
+  If an older SC version does not expose that
   symbol, the one-line fallback is `SetStudySubgraphValues(0, 0)` (the
   repo-proven spelling in OrderflowSignalV2/V3, OrderflowConfluence); the read
   path with `sc.GetStudyArrayFromChartUsingID(sc.ChartNumber, ...)` is already
@@ -141,7 +143,9 @@ All comparisons in integer ticks; `closeTick = round(Close / TickSize)`, etc.
   last closed bar (live) or acceptance bar (terminated). Text label marks it as
   inferred inventory.
 - All drawings are ordinary (non-user-drawn) `sc.UseTool` objects in one
-  namespace (bases Sec. 11); deleted by collapsing with `UTAM_ADD_OR_ADJUST`
+  namespace (bases Sec. 11); bubbles/rings use `DRAWING_ELLIPSEHIGHLIGHT`
+  (`DRAWING_ELLIPSE` does not exist in the exact header); rectangles use
+  `DRAWING_RECTANGLEHIGHLIGHT`; deleted by collapsing with `UTAM_ADD_OR_ADJUST`
   (same namespace — avoids the v1 user-drawing delete bug). Active ribbons refresh
   each processed bar; everything display-only (colors, sizes) takes effect without
   a structural rebuild.

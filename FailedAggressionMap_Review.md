@@ -335,3 +335,61 @@ Gate after fixes: **12/12 PASS** (`gate_check.py FailedAggressionMap.cpp`, 1262 
   BuildSpec Sec. 12; behavior unchanged (one alert per type per bar, live only).
 - L-6 (dead `rb` clamp): NO CHANGE — invariant `RibbonEndBar >= DetectBar`
   holds; defensive clamp left as-is.
+
+## 7. Header Audit disposition (2026-09-03, exact Zander headers, SC_DLL_VERSION 2927)
+
+Method: every `sc.*`, input, subgraph, drawing-constant, `s_UseTool`-field,
+VAP, and array API used by `FailedAggressionMap.cpp` was checked with exact
+word-boundary search against `sierrachart_zander.h` + `scstructures_zander.h`
++ `scconstants_zander.h`. `VAPContainer.h` / `SCString.h` are included but not
+copied locally, so those two symbols were verified via in-repo compiled-study
+precedent instead. No design change; no other study touched.
+
+Gate after fixes: **12/12 PASS** (`gate_check.py FailedAggressionMap.cpp`, 1266 lines).
+
+- C-1 (BLOCKER, FIXED) — `DRAWING_ELLIPSE` does not exist. Exact header
+  declares `DRAWING_ELLIPSEHIGHLIGHT = 13` (and `DRAWING_RECTANGLEHIGHLIGHT`,
+  `DRAWING_TEXT`); word-boundary search for `DRAWING_ELLIPSE` returns 0 hits —
+  the earlier substring match was a false positive on the longer name. No
+  other study uses this constant (only `FailedAggressionMap.cpp:261` did).
+  Fixed to `DRAWING_ELLIPSEHIGHLIGHT` in `FAMDrawEllipse`; code header and
+  BuildSpec Sec. 8 now name the correct constant.
+- C-2 (BLOCKER, FIXED) — `SetChartStudySubgraphValues(0, 0)` arity mismatch.
+  Exact header (`scstructures_zander.h:2884`) declares the 3-arg form
+  `SetChartStudySubgraphValues(int ChartNumber, int StudyID, int SubgraphIndex)`
+  (`CHART_STUDY_SUBGRAPH_VALUES`); the 2-arg call cannot compile. Fixed to
+  `SetChartStudySubgraphValues(0, 0, 0)` (disabled default preserved, task
+  spelling preserved). The `SetStudySubgraphValues(0, 0)` fallback stays
+  documented for older SC versions. This supersedes the H-1 "no change"
+  disposition: the symbol exists, only the arity was wrong. Read path
+  (`GetStudyArrayFromChartUsingID(ChartNumber, studyID, subgraph, array)`,
+  4-arg overload confirmed at `sierrachart_zander.h:1801`) and getters
+  (`GetStudyID`/`GetSubgraphIndex` both handle `CHART_STUDY_SUBGRAPH_VALUES`)
+  are unchanged and compatible with both spellings.
+- Verified clean (exact-header hits): `GetStudyArrayFromChartUsingID` (both
+  overloads), `GetTradingDayDate(const SCDateTime&)`, `SetAlert(int, int,
+  const SCString&)` (char-buffer callers convert implicitly, same as
+  `OrderflowSignalV3.cpp:642`), `DeleteACSChartDrawing(int, int, int)`,
+  `GetPersistentPointer`/`SetPersistentPointer`, `UseTool(s_UseTool&)`,
+  `SetCustomInputStrings`/`SetCustomInputIndex`, `SetInt`/`SetFloat` +
+  limits, `SetColor`/`GetColor`, `SetYesNo`/`GetYesNo`, `GetInt`/`GetFloat`/
+  `GetIndex`, all `s_UseTool` fields used (`BeginIndex`, `Begin/EndDateTime`,
+  `Begin/EndValue`, `SecondaryColor`, `TransparencyLevel`, `FontSize`,
+  `AddMethod`, `Text`), `DRAWSTYLE_IGNORE/POINT/DIAMOND`,
+  `SCALE_SAMEASREGION`, `TOOL_DELETE_CHARTDRAWING`, `UTAM_ADD_OR_ADJUST`,
+  subgraph `operator[](int)`, `SC_SUBGRAPHS_AVAILABLE = 60` (14 SGs) /
+  `SC_INPUTS_AVAILABLE = 128` (23 inputs), `High/Low/Close/BaseDateTimeIn/
+  TickSize/ArraySize/UpdateStartIndex/ChartNumber/LastCallToFunction/
+  SetDefaults/AutoLoop/GraphRegion/MaintainVolumeAtPriceData/
+  VolumeAtPriceForBars`, `COLORREF` via `windows.h` (same as TrappedTraders),
+  `T.Text = char*` (same as `TrappedTraders.cpp:714`).
+- Precedent-verified (header include not copied locally, no change):
+  `GetNextHigherVAPElement` + `s_VolumeAtPriceV2::{Ask,Bid}Volume` match
+  `TrappedTraders.cpp:409-410` and `LiquidityZones.cpp:234` exactly
+  (`INT_MIN` start, `(unsigned int)bar, tick, &pVAP`); `VAPContainer.h` is
+  `#include`d by the exact `sierrachart.h`, so absence from the local cache
+  is a copy gap, not a defect.
+- Sierra checklist delta: F5 compile should now pass the two fixed lines;
+  remaining Sierra-side confirmations are VAP-type behavior at runtime
+  (unchanged code path) and the standard replay/mapped/halo/rendering checks
+  in Sec. 4 (unchanged).

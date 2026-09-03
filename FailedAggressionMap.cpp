@@ -42,9 +42,13 @@
 //
 // MAPPED CONFLUENCE: optional Study-Subgraph input (disabled by default).
 //   Nonzero value on the detection bar adds a gold halo + SG flag only; it NEVER
-//   suppresses raw detections in v1.0. Uses SetChartStudySubgraphValues per the
-//   task; if the target SC version does not expose that symbol, the one-line
-//   fallback is SetStudySubgraphValues(0, 0) (read path is compatible).
+//   suppresses raw detections in v1.0. Uses SetChartStudySubgraphValues(0, 0, 0)
+//   per the task (3-arg Chart/Study/Subgraph form confirmed in the exact
+//   SC_DLL_VERSION 2927 header); if an older SC version does not expose that
+//   symbol, the one-line fallback is SetStudySubgraphValues(0, 0) (read path
+//   is compatible).
+//   Bubbles/rings use DRAWING_ELLIPSEHIGHLIGHT (DRAWING_ELLIPSE does not exist
+//   in the exact header).
 //
 // ALERTS (optional, off by default): live-only watermark, one alert per
 //   transition type per bar, anchored to the current bar. Failure-confirm and
@@ -258,7 +262,7 @@ static void FAMDrawEllipse(SCStudyInterfaceRef sc, int lineNum,
     s_UseTool T;
     T.Clear();
     T.ChartNumber       = sc.ChartNumber;
-    T.DrawingType       = DRAWING_ELLIPSE;
+    T.DrawingType       = DRAWING_ELLIPSEHIGHLIGHT;
     T.LineNumber        = lineNum;
     T.BeginDateTime     = dt0;
     T.EndDateTime       = dt1;
@@ -410,7 +414,7 @@ SCSFExport scsf_FailedAggressionMap(SCStudyInterfaceRef sc)
         In_AutoZnPct.Name = "Auto Zone Percentile";      In_AutoZnPct.SetInt(80);  In_AutoZnPct.SetIntLimits(50, 99);
 
         In_MappedSrc.Name = "Mapped Location Source (disabled = StudyID 0)";
-        In_MappedSrc.SetChartStudySubgraphValues(0, 0);
+        In_MappedSrc.SetChartStudySubgraphValues(0, 0, 0);
 
         In_RenderMode.Name = "Rendering Mode";
         In_RenderMode.SetCustomInputStrings("Bubble + Ribbon;Lifecycle Glyphs;Legacy Rectangle;Bubble + Ribbon + Rectangle");
