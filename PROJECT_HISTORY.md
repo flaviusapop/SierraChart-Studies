@@ -170,3 +170,19 @@ The order-flow engines have **"OTF Filter" inputs** (Arrow OTF Slot 1/2 and Conf
   `LastCallToFunction`.
 - Spec: `FailedAggressionMap_BuildSpec.md`. Static gate 12/12 on Linux.
   NOT yet compiled in Sierra Chart — needs F5 compile + replay validation.
+
+## 2026-09-03 — Failed Aggression Map v1.0 review fixes (standalone study)
+
+- Independent review (`FailedAggressionMap_Review.md`, no BLOCKERs, 12/12 gate)
+  followed by fix pass; `TrappedTraders.cpp` / `LiquidityZones.cpp` untouched.
+- Fixed: history rewrite now forces full rebuild (H-2); merge path publishes
+  the full pulse triple and recomputes strength from the merged total (M-1/M-2);
+  fingerprint folds full 64-bit threshold magnitudes (M-3); fail text anchored
+  at fail-bar close to match SG13 (M-4); Auto sampler uses full-length windows
+  only (M-5); centroid uses exact integer rounding incl. negative-safe
+  tick conversion (L-1/L-2).
+- Spec aligned: SG12 POINT / SG13 DIAMOND table (M-6), 23-input heading (L-4),
+  alert semantics + H-1 fallback documented. H-1 kept per task
+  (`SetChartStudySubgraphValues`, fallback noted for F5).
+- Gate 12/12 on Linux (1262 lines). Still NOT Sierra-compiled — F5 + replay
+  checklist in the review Sec. 4 remains.

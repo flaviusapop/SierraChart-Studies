@@ -87,7 +87,9 @@ All comparisons in integer ticks; `closeTick = round(Close / TickSize)`, etc.
   trading days (`sc.GetTradingDayDate`), excluding the current day, no lookahead.
   Computed once per trading day and cached in persistent state (`cachedDayDate`,
   `autoBlock`, `autoZone`, `autoReady`).
-  - Per prior day: slide the Sec. 4 window over that day's closed bars; collect
+   - Per prior day: slide the Sec. 4 window over that day's closed bars
+     (full-length windows only; truncated day-open windows are skipped so
+     calibration matches live detection); collect
     (a) per-level absolute deltas of directionally valid near-extreme levels and
     (b) per-window side totals (sum of qualifying levels per side per window).
     Daily value = percentile ((a) at In:12 `Auto Block Percentile` default 85,
@@ -102,20 +104,22 @@ All comparisons in integer ticks; `closeTick = round(Close / TickSize)`, etc.
   Manual precedence: an Auto candidate whose inclusive tick range intersects any
   live (not discarded/accepted) Manual event is suppressed, regardless of side.
   Same-mode overlap merges only within the same side AND same source (Manual/Manual
-  or Auto/Auto): expand range, add `int64` totals and tick-weight sums, recompute
-  centroid (fixes the v1 "merge drops delta" bug). Cross-side never merges.
+   or Auto/Auto): expand range, add `int64` totals and tick-weight sums, recompute
+   centroid with exact integer math and recompute strength from the merged
+   total, then publish the full pulse triple for the merge bar
+   (fixes the v1 "merge drops delta" bug). Cross-side never merges.
 - Every event stores `Source` (1 = Manual, 2 = Auto) and exports it (SG10).
   Auto drawings use distinct colors (In:19/20 inputs are the Manual pair; Auto
   uses fixed orange / light-blue documented in Sec. 9).
 
 ## 7. Mapped-location confluence (In:14, disabled by default)
 
-- Input type Study-Subgraph via `SetStudySubgraphValues(0, 0)` (StudyID 0 =
-  disabled). As-built note: the task text names `SetChartStudySubgraphValues`;
-  no local Sierra header exists to confirm that symbol, so the study uses the
-  repo-proven `SetStudySubgraphValues` (OrderflowSignalV2/V3, OrderflowConfluence)
-  with `sc.GetStudyArrayFromChartUsingID(sc.ChartNumber, ...)` for reads.
-  One-line change if the target SC version exposes the other name.
+- Input type Study-Subgraph via `SetChartStudySubgraphValues(0, 0)` (StudyID 0 =
+  disabled), per the task. If the target SC version does not expose that
+  symbol, the one-line fallback is `SetStudySubgraphValues(0, 0)` (the
+  repo-proven spelling in OrderflowSignalV2/V3, OrderflowConfluence); the read
+  path with `sc.GetStudyArrayFromChartUsingID(sc.ChartNumber, ...)` is already
+  compatible with both spellings. Must be confirmed at F5 compile.
   When enabled, the referenced array is fetched once per call via
   `sc.GetStudyArrayFromChartUsingID(sc.ChartNumber, ...)`.
 - Nonzero value (`!= 0.0f`) on the detection bar (a closed bar) = confluence.
@@ -173,10 +177,10 @@ All set per closed bar; cleared from `sc.UpdateStartIndex` forward every call
 | SG9 | Mapped Confluence Flag | IGNORE | 1 at detection bar if confluence |
 | SG10 | Threshold Source | IGNORE | 1 Manual / 2 Auto at detection bar |
 | SG11 | Event ID | IGNORE | stable float ID at detection bar |
-| SG12 | Failure Bubble | CIRCLE, hollow | centroid price at confirmation bar |
-| SG13 | Retest/Accept Marker | POINT | retest price at fail bar / accept price at accept bar |
+| SG12 | Failure Bubble | POINT, width 3 | centroid price at confirmation bar |
+| SG13 | Retest/Accept Marker | DIAMOND, width 3 | retest price at fail bar / accept price at accept bar |
 
-## 11. Inputs (24, append-only, documented)
+## 11. Inputs (23, append-only, documented)
 
 | # | Name | Type / Default |
 |---|---|---|
@@ -218,11 +222,20 @@ line number = base + event ID.
   in `(prevLastClosed, lastClosed]` for both detection and transitions.
 - Settings fingerprint over structural inputs (In:1..In:15 incl. mapped-source
   StudyID/Subgraph and threshold-mode indexes) forces immediate full rebuild
-  (state reset + drawing purge by ID range + SG clear).
+  (state reset + drawing purge by ID range + SG clear). Threshold magnitudes
+  are folded whole (no 16-bit truncation) so any edit rebuilds.
 - Intrabar guard on `ArraySize`; forming bar never read for logic.
 - Alerts (if enabled): live-only watermark — fire only on non-full-recalc calls
   for transitions landing exactly on the newest closed bar, anchored with
   `sc.SetAlert(sound, sc.ArraySize - 1, ...)`. Never from history.
+  One alert per transition type per bar; failure-confirm and failed-retest
+  alert, acceptance-through intentionally has no alert.
+- History rewrite (backfill with `UpdateStartIndex <= PrevLastClosed`) forces a
+  full rebuild so SG pulses under the rewrite are recomputed, not left zeroed.
+- Same-mode merge publishes the full pulse triple for the merge bar
+  (side/centroid/strength/mapped/source/ID) and recomputes strength from the
+  merged total. Failed-retest text is anchored at the fail-bar close to agree
+  with SG13. Auto sampler uses full-length windows only.
 - No `static`/`thread_local` function locals; no `#` comments; no float `==` on
   price arrays; SG count 14 < 60; every input defaulted AND read in logic.
 

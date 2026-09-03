@@ -42,7 +42,13 @@
 //
 // MAPPED CONFLUENCE: optional Study-Subgraph input (disabled by default).
 //   Nonzero value on the detection bar adds a gold halo + SG flag only; it NEVER
-//   suppresses raw detections in v1.0.
+//   suppresses raw detections in v1.0. Uses SetChartStudySubgraphValues per the
+//   task; if the target SC version does not expose that symbol, the one-line
+//   fallback is SetStudySubgraphValues(0, 0) (read path is compatible).
+//
+// ALERTS (optional, off by default): live-only watermark, one alert per
+//   transition type per bar, anchored to the current bar. Failure-confirm and
+//   failed-retest alert; acceptance-through intentionally has no alert.
 //
 // RENDERING MODES: 0 = Bubble + Ribbon (default), 1 = Lifecycle Glyphs,
 //   2 = Legacy Rectangle, 3 = Bubble + Ribbon + Rectangle.
@@ -223,7 +229,11 @@ static bool FAMRangesIntersect(int aBot, int aTop, int bBot, int bTop)
 
 static int FAMPriceToTick(float price, float tickSize)
 {
-    return (int)floorf(price / tickSize + 0.5f);
+    // Round-half-away on both sides of zero (exact for non-negative
+    // futures prices; also correct if price ever goes negative).
+    if (price >= 0.0f)
+        return (int)floorf(price / tickSize + 0.5f);
+    return (int)ceilf(price / tickSize - 0.5f);
 }
 
 // Nearest-rank percentile over a sorted ascending array.
@@ -488,7 +498,11 @@ SCSFExport scsf_FailedAggressionMap(SCStudyInterfaceRef sc)
     // =========================================================================
     const int fp0 = (lookback & 0xFF) | ((proxTicks & 0xFF) << 8) |
                     ((minBlocks & 0xFF) << 16) | ((confBars & 0xFF) << 24);
-    const int fp1 = (int)(manBlock & 0xFFFF) | ((int)(manZone & 0xFFFF) << 16);
+    // Fold the full 64-bit threshold magnitudes into the word so edits
+    // differing by multiples of 65536 still rebuild (M-3 fix).
+    const int manBlockFold = (int)(manBlock ^ (manBlock >> 16) ^ (manBlock >> 32));
+    const int manZoneFold  = (int)(manZone ^ (manZone >> 16) ^ (manZone >> 32));
+    const int fp1 = manBlockFold * 31 ^ manZoneFold;
     const int fp2 = (advTicks & 0xFF) | ((exitTicks & 0xFF) << 8) |
                     ((accTicks & 0xFF) << 16) | ((threshMode & 0xFF) << 24);
     const int fp3 = (autoDays & 0xFF) | ((autoBlkPct & 0xFF) << 8) |
@@ -503,6 +517,14 @@ SCSFExport scsf_FailedAggressionMap(SCStudyInterfaceRef sc)
     else if (pState->Fp0 != fp0 || pState->Fp1 != fp1 ||
              pState->Fp2 != fp2 || pState->Fp3 != fp3 ||
              pState->MappedFp != mappedFp)
+        isFullRecalc = true;
+
+    // History rewrite (backfill correcting bars at or below what we already
+    // processed) must rebuild, not patch: the incremental path zeroes SGs
+    // from UpdateStartIndex forward but would never recompute pulses on
+    // bars at or below PrevLastClosed (H-2 fix). Cost is one full recalc.
+    if (!isFullRecalc && pState != nullptr && pState->PrevLastClosed >= 0 &&
+        sc.UpdateStartIndex <= pState->PrevLastClosed)
         isFullRecalc = true;
 
     if (isFullRecalc)
@@ -620,9 +642,12 @@ SCSFExport scsf_FailedAggressionMap(SCStudyInterfaceRef sc)
                         {
                             if (we < lookback - 1)
                                 continue;
+                            // Only full-length windows calibrate: live
+                            // detection never emits truncated day-open
+                            // windows, so the sampler must not either (M-5).
+                            if (we - dayStarts[dd] + 1 < lookback)
+                                continue;
                             int ws = we - lookback + 1;
-                            if (ws < dayStarts[dd])
-                                ws = dayStarts[dd];
                             map<int, int64> dMap;
                             float wHigh = -1e30f, wLow = 1e30f;
                             for (int bi = ws; bi <= we; bi++)
@@ -877,7 +902,9 @@ SCSFExport scsf_FailedAggressionMap(SCStudyInterfaceRef sc)
                     continue;
 
                 const int side = isHigh ? 1 : -1;
-                const int centroid = (int)((double)tickW / (double)total + 0.5);
+                // Exact integer rounding (total is a positive magnitude sum
+                // here, tickW is non-negative for non-negative prices).
+                const int centroid = (int)((tickW + total / 2) / total);
 
                 // Both-mode Manual precedence: suppress an Auto candidate whose
                 // inclusive tick range intersects any live Manual event.
@@ -923,17 +950,31 @@ SCSFExport scsf_FailedAggressionMap(SCStudyInterfaceRef sc)
 
                 if (target != nullptr)
                 {
-                    // Merge: widen, ADD totals (v1 dropped them), recompute centroid.
+                    // Merge: widen, ADD totals, recompute centroid with exact
+                    // integer math, recompute strength from the MERGED total
+                    // (M-2), and publish the full pulse triple so bar w stays
+                    // downstream-consistent (M-1).
                     if (topT > target->TopTick) target->TopTick = topT;
                     if (botT < target->BotTick) target->BotTick = botT;
                     target->TotalDelta += (isHigh ? total : -total);
                     target->TickWeight += tickW;
                     const int64 magT = target->TotalDelta >= 0 ? target->TotalDelta : -target->TotalDelta;
                     if (magT > 0)
-                        target->CentroidTick = (int)((double)target->TickWeight / (double)magT + 0.5);
-                    target->Strength10 = strength;
+                        target->CentroidTick = (int)((target->TickWeight + magT / 2) / magT);
+                    float mStr = (float)((double)magT * 10.0 / ((double)zTh * 3.0));
+                    if (mStr < 0.5f) mStr = 0.5f;
+                    if (mStr > 10.0f) mStr = 10.0f;
+                    target->Strength10 = mStr;
+                    if (useMapped && mappedArr.GetArraySize() > w && mappedArr[w] != 0.0f)
+                        target->MappedFlag = 1;
+                    SG_CandSide[w] = (float)side;
+                    SG_Centroid[w] = (float)target->CentroidTick * tickSize;
                     SG_Top[w] = (float)target->TopTick * tickSize;
                     SG_Bot[w] = (float)target->BotTick * tickSize;
+                    SG_Strength[w] = mStr;
+                    SG_Mapped[w] = (float)target->MappedFlag;
+                    SG_Source[w] = (float)thrSrc[t];
+                    SG_EventID[w] = (float)target->ID;
                     continue;
                 }
 
@@ -1132,9 +1173,9 @@ SCSFExport scsf_FailedAggressionMap(SCStudyInterfaceRef sc)
         {
             if (ev->FailBar >= 0)
             {
-                const double ap = isHigh
-                    ? (double)(ev->TopTick + 1) * tickSize
-                    : (double)(ev->BotTick - 1) * tickSize;
+                // Anchored at the fail-bar close so the drawn text agrees
+                // with SG13 (M-4 fix).
+                const double ap = (double)sc.Close[ev->FailBar];
                 FAMDrawText(sc, FAM_BASE_ARROW + ev->ID, ev->FailBar, ap,
                     isHigh ? "FAIL SHORT" : "FAIL LONG", sideColor, 9);
             }
