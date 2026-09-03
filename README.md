@@ -28,3 +28,4 @@ A collection of Sierra Chart ACSIL (C++) custom studies for ES futures scalping,
 | `TrappedTraders.cpp` | Trapped trader detection |
 | `FailedAggressionMap.cpp` | Failed aggression map: volume-scaled bubble at delta-weighted centroid + inferred-inventory ribbon, confirm/retest/accept lifecycle, Manual/Auto/Both thresholds (see `FailedAggressionMap_BuildSpec.md`) |
 | `AVWAPRotation.cpp` | Anchored VWAP rotation study |
+| `EffortVsResult.cpp` | Effort-vs-result filter: bar-level VAP-delta effort vs price reward with delayed failure confirmation (see `EffortVsResult_BuildSpec.md`) |

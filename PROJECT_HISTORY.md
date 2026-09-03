@@ -186,3 +186,25 @@ The order-flow engines have **"OTF Filter" inputs** (Arrow OTF Slot 1/2 and Conf
   (`SetChartStudySubgraphValues`, fallback noted for F5).
 - Gate 12/12 on Linux (1262 lines). Still NOT Sierra-compiled — F5 + replay
   checklist in the review Sec. 4 remains.
+
+## 2026-09-03 — EffortVsResult v1.0 (new standalone study)
+
+New files: `EffortVsResult.cpp`, `EffortVsResult_BuildSpec.md`. No existing
+study modified.
+
+- **What it is:** lightweight closed-bar filter measuring whether aggressive
+  order flow was rewarded by price. `BarDelta` from the chart's own VAP
+  (`MaintainVolumeAtPriceData = 1`, no Numbers Bars dependency), normalized by
+  EWMA `|BarDelta|` without mean subtraction; result (`Close-Open` /
+  `Close-PrevClose` / excursion-close-location composite) normalized by EWMA
+  True Range. `SignedFailure = -sign(Effort) * |Effort| * max(0, Stall -
+  SignedReward)`, gated by Minimum Effort 1.25, EMA-smoothed (3). Negative /
+  magenta = buyers failed; positive / cyan = sellers failed.
+- **Confirmation:** one-bar-delayed channel prints pulses + price-region
+  arrows on bar `i+1` only (no extension beyond candidate extreme + adverse
+  close vs candidate midpoint), no future leak, no rectangles.
+- **Engineering:** 13 SGs, 20 inputs, persistent slots 1 (bars guard), 2/3
+  (alert watermarks), 4-6 (settings fingerprint), ptr 10 (EWMA carry struct,
+  no STL). Post-loop alert watermark scan anchored to the current bar;
+  full recalc fast-forwards with no historical alerts. Static gate 12/12;
+  Sierra compile + replay validation still open (no build system on Linux).
