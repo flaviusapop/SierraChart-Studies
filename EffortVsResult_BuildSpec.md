@@ -35,7 +35,11 @@ source; the study requires VAP on its own chart).
   so division is always safe).
 - `Effort[i] = BarDelta[i] / EffortScale`, then optionally capped:
   if `Max Normalized Value > 0`, clamp to `[-MaxNorm, +MaxNorm]` (default 5);
-  `0` disables the cap.
+  `0` disables the cap. The cap is clamped up to `Minimum Effort` first
+  (`0 < MaxNorm < MinEffort` becomes `MaxNorm = MinEffort`): both the failure
+  gate and the confirmation candidate gate test capped `|Effort|`, so an
+  unclamped smaller cap would silently flatline all failure/confirmation
+  output.
 - House convention: normalize directional effort WITHOUT mean subtraction so
   sustained aggression does not decay toward zero merely because its mean
   shifted (same rationale as FlowConviction v2 change 7).
@@ -92,7 +96,12 @@ source; the study requires VAP on its own chart).
     `L[i+1] >= L[i] - FavTicks * TS`,
     `C[i+1] >= Mid[i] + AdvTicks * TS`.
 - Outputs: buyer-failure confirmation pulse, seller-failure confirmation
-  pulse (each holds the smoothed failure value on its bar, else 0), plus
+  pulse. Each pulse holds the CANDIDATE bar's failure magnitude (`SG_SFailS[j-1]`
+  preferred, `SG_SFail[j-1]` fallback when smoothed has the wrong sign or is
+  zero, current smoothed as second fallback), published only with the correct
+  sign (buyer `< 0`, seller `> 0`, else 0), so a print-bar of the opposite side
+  can never leak into the other channel. Arrows print on every price
+  confirmation regardless of whether a non-zero pulse was available. Plus
   price-region arrows: buyer failure -> `ARROW_DOWN` at
   `H[i+1] + ArrowOffsetTicks * TS`; seller failure -> `ARROW_UP` at
   `L[i+1] - ArrowOffsetTicks * TS`. No persistent rectangles.
@@ -137,7 +146,8 @@ source; the study requires VAP on its own chart).
 | 19 | Alert Sound Number | alert sound | 1 | no (no SG effect) |
 
 Settings fingerprint (persistent int slots 4-6) covers every structural input;
-any change forces a full rebuild. Colors and alert inputs are display-only and
+any change forces a full rebuild. Float packing quantum is 0.001 (typed edits
+smaller than that need a manual recalculate). Colors and alert inputs are display-only and
 excluded.
 
 ## 6. Outputs (13 subgraphs, 0-based, all under the 60-SG limit)
@@ -149,17 +159,20 @@ excluded.
 | 2 | Normalized Effort | LINE | capped `Effort` |
 | 3 | Normalized Result | LINE | `ResultNorm` (TR units) |
 | 4 | Signed Reward | LINE | `sign(Effort) * ResultNorm` |
-| 5 | Raw Signed Failure | BAR | `SignedFailure` |
-| 6 | Smoothed Signed Failure | BAR + DataColor | EMA failure; main display |
-| 7 | Buyer Failure Pulse | POINT | smoothed value on confirmed bars, else 0 |
-| 8 | Seller Failure Pulse | POINT | smoothed value on confirmed bars, else 0 |
+| 5 | Raw Signed Failure | BAR | `SignedFailure` (zeros hidden) |
+| 6 | Smoothed Signed Failure | BAR + DataColor | EMA failure; main display (zero baseline drawn) |
+| 7 | Buyer Failure Pulse | POINT | candidate failure (< 0) on confirmed bars, else 0 |
+| 8 | Seller Failure Pulse | POINT | candidate failure (> 0) on confirmed bars, else 0 |
 | 9 | Buyer Failure Arrow | ARROW_DOWN | price on confirmed bars, else 0 |
 | 10 | Seller Failure Arrow | ARROW_UP | price on confirmed bars, else 0 |
 | 11 | Rewarded Aggression | BAR | `SignedReward` when rewarded, else 0 (zeros hidden) |
 | 12 | Ready Flag | LINE (1px) | 1 once `i >= max(EffortLen, ResultLen)`, else 0 |
 
 Full recalculation overwrites every bar of every SG (zero stale outputs);
-the forming bar is always written as 0 (no provisional values).
+value AND `DataColor` are cleared together on pulses/arrows/rewarded so no
+stale color survives a settings change. `SG_SFail.DrawZeros = 0` hides raw
+zeros while `SG_SFailS.DrawZeros = 1` draws the main-histogram zero baseline.
+The forming bar is always written as 0 (no provisional values).
 
 ## 7. Engineering
 
@@ -167,10 +180,15 @@ the forming bar is always written as 0 (no provisional values).
   the last CLOSED bar is `ArraySize - 2`. Intrabar ticks return early via the
   slot-1 `lastKnownBars` guard. No provisional display (spec permits omitting
   it; forming bar outputs are zero and never fire confirmations/alerts).
+  The VAP-null branch shares the same guard (fingerprint computed first):
+  intrabar ticks return without rewriting; new bars / settings changes re-zero
+  values + colors and update `lastKnownBars`.
 - Live-sequential equivalence: full recalc loops `0..lastClosed` rebuilding
   EWMA state from scratch; incremental updates loop over ALL newly closed bars
   `(lastProcessed+1)..lastClosed`, so reconnect/backfill gaps are processed in
-  order with identical arithmetic. EWMA/EMA state lives in a plain-C heap
+  order with identical arithmetic. A mid-history data correction
+  (`UpdateStartIndex > 0 && UpdateStartIndex <= lastProcessed`) forces a full
+  rebuild. EWMA/EMA state lives in a plain-C heap
   struct (persistent pointer slot 10; no STL in persistent state). Any
   shrink of `ArraySize` below `lastProcessed`, a null state, or a settings
   change forces a full rebuild.
@@ -179,10 +197,17 @@ the forming bar is always written as 0 (no provisional values).
   the int-slot convention range to avoid collision).
 - Alerts: post-loop watermark scan (house pattern). Full recalc fast-forwards
   watermarks with no alerts (no historical alert storm). Incremental: scan the
-  last 10 closed bars for the newest un-alerted buyer/seller pulse;
-  `sc.SetAlert(sound, ArraySize - 1, msg)` anchored to the current bar, one
-  alert per channel per cycle. Messages use "failed aggression evidence".
-  Fires only when alerts enabled, sound > 0, and confirmations enabled.
+  last 10 closed bars for the newest un-alerted buyer (`pulse < -1e-6`) /
+  seller (`pulse > +1e-6`) pulse; `sc.SetAlert(sound, ArraySize - 1, msg)`
+  anchored to the current bar, one alert per channel per cycle. No zero
+  sentinel: the first call always takes the full-recalc path (null state).
+  While alerts are disabled watermarks still advance, so re-enabling does not
+  catch up bars that printed while disabled. Messages use "failed aggression
+  evidence". Fires only when alerts enabled, sound > 0, and confirmations
+  enabled.
+- Display-only color inputs are excluded from the fingerprint per house
+  convention: color changes apply to new bars immediately; history picks them
+  up on the next full recalculate (Ctrl+Insert).
 - No float equality on prices (all comparisons are `>`/`>=`/`<`/`<=` on
   computed thresholds, never `==` on OHLC). No Python-style `#` comments.
 - Warmup: `Ready[i] = (i >= max(EffortLen, ResultLen))`; confirmations require

@@ -57,8 +57,8 @@
 //   SG:4  Signed Reward               LINE               sign(Effort)*ResultNorm
 //   SG:5  Raw Signed Failure          BAR                SignedFailure
 //   SG:6  Smoothed Signed Failure     BAR + DataColor    EMA failure, main view
-//   SG:7  Buyer Failure Pulse         POINT              confirm value, else 0
-//   SG:8  Seller Failure Pulse        POINT              confirm value, else 0
+//   SG:7  Buyer Failure Pulse         POINT              candidate value, else 0
+//   SG:8  Seller Failure Pulse        POINT              candidate value, else 0
 //   SG:9  Buyer Failure Arrow         ARROW_DOWN         price, else 0
 //   SG:10 Seller Failure Arrow        ARROW_UP           price, else 0
 //   SG:11 Rewarded Aggression         BAR                reward, else 0
@@ -137,7 +137,10 @@ static COLORREF EVR_Blend(COLORREF base, COLORREF target, float t)
 	return RGB(r, g, b);
 }
 
-// Sum (AskVolume - BidVolume) across one bar's VAP levels with int64 math
+// Sum (AskVolume - BidVolume) across one bar's VAP levels with int64 math.
+// NOTE: int64 sum is narrowed to float on return. Beyond 2^24 (~16.7M net
+// contracts/bar) float loses integer precision; ES footprint bars never
+// approach that and the EWMA/scale math is float throughout by design.
 static float EVR_BarDelta(SCStudyInterfaceRef sc, int barIndex)
 {
 	int priceInTicks = INT_MIN;
@@ -386,7 +389,13 @@ SCSFExport scsf_EffortVsResult(SCStudyInterfaceRef sc)
 	const float minEffort = max(0.0f, In_MinEffort.GetFloat());
 	const float stall     = max(0.0f, In_Stall.GetFloat());
 	const int resultMode  = In_ResultMode.GetIndex();
-	const float maxNorm   = max(0.0f, In_MaxNorm.GetFloat());
+	float maxNorm   = max(0.0f, In_MaxNorm.GetFloat());
+	// Cap must not strangle the effort gate: both the failure gate and the
+	// candidate gate test capped |Effort| >= Minimum Effort, so
+	// 0 < MaxNorm < MinEffort would flatline all failure/confirmation output.
+	// Clamp the cap up to the gate instead of failing silently.
+	if (maxNorm > 0.0f && maxNorm < minEffort)
+		maxNorm = minEffort;
 	const int confOn      = In_ConfOn.GetYesNo();
 	const int favTicks    = max(0, In_FavTicks.GetInt());
 	const int advTicks    = max(0, In_AdvTicks.GetInt());
@@ -412,33 +421,11 @@ SCSFExport scsf_EffortVsResult(SCStudyInterfaceRef sc)
 	const float capRef = (maxNorm > 0.0f) ? maxNorm : 5.0f;
 
 	// =====================================================================
-	// VAP guard — no VAP source, no outputs (zeros, never stale)
-	// =====================================================================
-	if (sc.VolumeAtPriceForBars == nullptr)
-	{
-		for (int i = 0; i < sc.ArraySize; i++)
-		{
-			SG_Delta[i] = 0.0f;
-			SG_Scale[i] = 0.0f;
-			SG_Effort[i] = 0.0f;
-			SG_Result[i] = 0.0f;
-			SG_Reward[i] = 0.0f;
-			SG_SFail[i] = 0.0f;
-			SG_SFailS[i] = 0.0f;
-			SG_SFailS.DataColor[i] = EVR_GRAY;
-			SG_BuyPuls[i] = 0.0f;
-			SG_SellPul[i] = 0.0f;
-			SG_BuyArr[i] = 0.0f;
-			SG_SellArr[i] = 0.0f;
-			SG_RewAgg[i] = 0.0f;
-			SG_Ready[i] = 0.0f;
-		}
-		return;
-	}
-
-	// =====================================================================
 	// Settings fingerprint — structural inputs force a full rebuild.
 	// Display-only inputs (colors, alert enable/sound) are excluded.
+	// Computed before the VAP guard so both paths share rebuild semantics.
+	// Float quantum is 0.001 (x1000 packing); smaller typed edits need a
+	// manual recalculate. maxNorm here is post-clamp (>= minEffort).
 	// =====================================================================
 	const unsigned int ufp0 =
 		((unsigned int)(effortLen & 0xFFFF)) |
@@ -451,7 +438,7 @@ SCSFExport scsf_EffortVsResult(SCStudyInterfaceRef sc)
 		(((unsigned int)(showReward & 0x1)) << 26);
 	unsigned int ufp2 = (unsigned int)((int)(minEffort * 1000.0f));
 	ufp2 = ufp2 * 31u + (unsigned int)((int)(stall * 1000.0f));
-	ufp2 = ufp2 * 31u + (unsigned int)((int)(maxNorm * 100.0f));
+	ufp2 = ufp2 * 31u + (unsigned int)((int)(maxNorm * 1000.0f));
 	ufp2 = ufp2 * 31u + (unsigned int)favTicks;
 	ufp2 = ufp2 * 31u + (unsigned int)advTicks;
 	ufp2 = ufp2 * 31u + (unsigned int)arrowOffset;
@@ -463,6 +450,46 @@ SCSFExport scsf_EffortVsResult(SCStudyInterfaceRef sc)
 		(sc.GetPersistentInt(EVR_INT_FP0) != fp0) ||
 		(sc.GetPersistentInt(EVR_INT_FP1) != fp1) ||
 		(sc.GetPersistentInt(EVR_INT_FP2) != fp2);
+
+	// =====================================================================
+	// VAP guard — no VAP source, no outputs (zeros, never stale).
+	// Intrabar ticks return early without rewriting all bars (perf on
+	// footprint-less charts); new bars / settings changes re-zero.
+	// =====================================================================
+	if (sc.VolumeAtPriceForBars == nullptr)
+	{
+		const bool vapFull = (sc.UpdateStartIndex == 0) ||
+			(sc.IsFullRecalculation != 0) || settingsChanged;
+		if (!vapFull && sc.ArraySize == sc.GetPersistentInt(EVR_INT_BARS))
+			return;
+		sc.SetPersistentInt(EVR_INT_FP0, fp0);
+		sc.SetPersistentInt(EVR_INT_FP1, fp1);
+		sc.SetPersistentInt(EVR_INT_FP2, fp2);
+		for (int i = 0; i < sc.ArraySize; i++)
+		{
+			SG_Delta[i] = 0.0f;
+			SG_Scale[i] = 0.0f;
+			SG_Effort[i] = 0.0f;
+			SG_Result[i] = 0.0f;
+			SG_Reward[i] = 0.0f;
+			SG_SFail[i] = 0.0f;
+			SG_SFailS[i] = 0.0f;
+			SG_SFailS.DataColor[i] = EVR_GRAY;
+			SG_BuyPuls[i] = 0.0f;
+			SG_BuyPuls.DataColor[i] = buyArrowC;
+			SG_SellPul[i] = 0.0f;
+			SG_SellPul.DataColor[i] = sellArrowC;
+			SG_BuyArr[i] = 0.0f;
+			SG_BuyArr.DataColor[i] = buyArrowC;
+			SG_SellArr[i] = 0.0f;
+			SG_SellArr.DataColor[i] = sellArrowC;
+			SG_RewAgg[i] = 0.0f;
+			SG_RewAgg.DataColor[i] = EVR_GRAY;
+			SG_Ready[i] = 0.0f;
+		}
+		sc.SetPersistentInt(EVR_INT_BARS, sc.ArraySize);
+		return;
+	}
 
 	// =====================================================================
 	// Persistent state + full-recalc detection
@@ -479,6 +506,10 @@ SCSFExport scsf_EffortVsResult(SCStudyInterfaceRef sc)
 	const int lastClosed = sc.ArraySize - 2;  // ArraySize-1 is forming
 	if (!isFullRecalc && pS != nullptr && lastClosed < pS->lastProcessed)
 		isFullRecalc = true;  // array shrank (reload) — rebuild from scratch
+	if (!isFullRecalc && pS != nullptr
+		&& sc.UpdateStartIndex > 0
+		&& sc.UpdateStartIndex <= pS->lastProcessed)
+		isFullRecalc = true;  // mid-history data correction — rewind/rebuild
 
 	if (isFullRecalc)
 	{
@@ -624,16 +655,19 @@ SCSFExport scsf_EffortVsResult(SCStudyInterfaceRef sc)
 			SG_SFailS.DataColor[j] = EVR_GRAY;
 
 		SG_BuyPuls[j] = 0.0f;
+		SG_BuyPuls.DataColor[j] = buyArrowC;
 		SG_SellPul[j] = 0.0f;
+		SG_SellPul.DataColor[j] = sellArrowC;
 		SG_BuyArr[j] = 0.0f;
+		SG_BuyArr.DataColor[j] = buyArrowC;
 		SG_SellArr[j] = 0.0f;
+		SG_SellArr.DataColor[j] = sellArrowC;
 
 		float rewarded = 0.0f;
 		if (showReward != 0 && fabsf(effort) >= minEffort && sReward > 0.0f)
 			rewarded = sReward;
 		SG_RewAgg[j] = rewarded;
-		if (rewarded != 0.0f)
-			SG_RewAgg.DataColor[j] = rewardC;
+		SG_RewAgg.DataColor[j] = (rewarded != 0.0f) ? rewardC : EVR_GRAY;
 
 		SG_Ready[j] = (j >= warmupBars) ? 1.0f : 0.0f;
 
@@ -656,8 +690,20 @@ SCSFExport scsf_EffortVsResult(SCStudyInterfaceRef sc)
 						midPrev - (float)advTicks * tickSize;
 					if (sc.High[j] <= extLim && sc.Close[j] <= advLim)
 					{
-						SG_BuyPuls[j] = sfSmooth;
-						SG_BuyPuls.DataColor[j] = buyArrowC;
+						// Pulse holds the CANDIDATE's failure magnitude so
+						// its sign always matches the confirmed side. Prefer
+						// the candidate smoothed value; fall back to candidate
+						// raw (sign-guaranteed) then current smoothed.
+						float candPulse = SG_SFailS[j - 1];
+						if (!(candPulse < 0.0f))
+							candPulse = SG_SFail[j - 1];
+						if (!(candPulse < 0.0f) && sfSmooth < 0.0f)
+							candPulse = sfSmooth;
+						if (candPulse < 0.0f)
+						{
+							SG_BuyPuls[j] = candPulse;
+							SG_BuyPuls.DataColor[j] = buyArrowC;
+						}
 						if (showArrows != 0)
 						{
 							SG_BuyArr[j] = sc.High[j]
@@ -675,8 +721,16 @@ SCSFExport scsf_EffortVsResult(SCStudyInterfaceRef sc)
 						midPrev + (float)advTicks * tickSize;
 					if (sc.Low[j] >= extLim && sc.Close[j] >= advLim)
 					{
-						SG_SellPul[j] = sfSmooth;
-						SG_SellPul.DataColor[j] = sellArrowC;
+						float candPulse = SG_SFailS[j - 1];
+						if (!(candPulse > 0.0f))
+							candPulse = SG_SFail[j - 1];
+						if (!(candPulse > 0.0f) && sfSmooth > 0.0f)
+							candPulse = sfSmooth;
+						if (candPulse > 0.0f)
+						{
+							SG_SellPul[j] = candPulse;
+							SG_SellPul.DataColor[j] = sellArrowC;
+						}
 						if (showArrows != 0)
 						{
 							SG_SellArr[j] = sc.Low[j]
@@ -702,10 +756,15 @@ SCSFExport scsf_EffortVsResult(SCStudyInterfaceRef sc)
 		SG_SFailS[forming] = 0.0f;
 		SG_SFailS.DataColor[forming] = EVR_GRAY;
 		SG_BuyPuls[forming] = 0.0f;
+		SG_BuyPuls.DataColor[forming] = buyArrowC;
 		SG_SellPul[forming] = 0.0f;
+		SG_SellPul.DataColor[forming] = sellArrowC;
 		SG_BuyArr[forming] = 0.0f;
+		SG_BuyArr.DataColor[forming] = buyArrowC;
 		SG_SellArr[forming] = 0.0f;
+		SG_SellArr.DataColor[forming] = sellArrowC;
 		SG_RewAgg[forming] = 0.0f;
+		SG_RewAgg.DataColor[forming] = EVR_GRAY;
 		SG_Ready[forming] = 0.0f;
 	}
 
@@ -714,12 +773,15 @@ SCSFExport scsf_EffortVsResult(SCStudyInterfaceRef sc)
 
 	// =====================================================================
 	// Alerts — post-loop watermark scan (house pattern). Full recalc
-	// fast-forwards watermarks and never alerts historical bars.
+	// fast-forwards watermarks and never alerts historical bars. First call
+	// always takes the isFullRecalc path (null state), so no zero-sentinel
+	// is needed; watermarks are plain bar indices thereafter. While alerts
+	// are disabled watermarks still advance (no catch-up storm on re-enable).
 	// =====================================================================
 	int& alertedBuy = sc.GetPersistentInt(EVR_INT_ALERTB);
 	int& alertedSell = sc.GetPersistentInt(EVR_INT_ALERTS);
 
-	if (isFullRecalc || alertedBuy == 0 || alertedSell == 0)
+	if (isFullRecalc)
 	{
 		alertedBuy = lastClosed;
 		alertedSell = lastClosed;
@@ -741,7 +803,7 @@ SCSFExport scsf_EffortVsResult(SCStudyInterfaceRef sc)
 	int startB = (alertedBuy + 1 > scanFloor) ? (alertedBuy + 1) : scanFloor;
 	for (int b = lastClosed; b >= startB; b--)
 	{
-		if (SG_BuyPuls[b] != 0.0f)
+		if (SG_BuyPuls[b] < -0.000001f)
 		{
 			SCString msg;
 			msg.Format("Effort vs Result: buyer failed aggression evidence "
@@ -755,7 +817,7 @@ SCSFExport scsf_EffortVsResult(SCStudyInterfaceRef sc)
 	int startS = (alertedSell + 1 > scanFloor) ? (alertedSell + 1) : scanFloor;
 	for (int b = lastClosed; b >= startS; b--)
 	{
-		if (SG_SellPul[b] != 0.0f)
+		if (SG_SellPul[b] > 0.000001f)
 		{
 			SCString msg;
 			msg.Format("Effort vs Result: seller failed aggression evidence "

@@ -208,3 +208,32 @@ study modified.
   no STL). Post-loop alert watermark scan anchored to the current bar;
   full recalc fast-forwards with no historical alerts. Static gate 12/12;
   Sierra compile + replay validation still open (no build system on Linux).
+
+## 2026-09-03 — EffortVsResult review fixes (same branch, no existing study touched)
+
+Addressed the independent review (`EffortVsResult_Review.md`: 1 HIGH, 5
+MEDIUM, 5 LOW). No BLOCKERs; all findings valid except LOW-3/4 (no-action,
+documented) and MEDIUM-3 core (pattern already correct).
+
+- **HIGH-1:** confirmation pulses now hold the CANDIDATE bar's failure
+  (`SG_SFailS[j-1]`, fallback `SG_SFail[j-1]`, then current smoothed),
+  published only with the correct sign (buyer `< 0`, seller `> 0`); arrows
+  still print on every price confirmation. Alert scan sign-gated with 1e-6
+  epsilon (`< -1e-6` buyer, `> +1e-6` seller).
+- **MEDIUM-1:** pulse/arrow/rewarded `DataColor` cleared alongside zero values
+  in-loop, forming-bar, and VAP-null paths.
+- **MEDIUM-2:** mid-history data correction (`UpdateStartIndex <=
+  lastProcessed`) forces a full rebuild; history can no longer diverge after
+  corrections.
+- **MEDIUM-3:** dropped the `== 0` watermark sentinel (first call always takes
+  the full-recalc path); documented that disabled-alert windows still advance
+  watermarks (no catch-up storm on re-enable).
+- **MEDIUM-4:** `MaxNorm` clamped up to `Minimum Effort` so `0 < MaxNorm <
+  MinEffort` can no longer silently flatline the study.
+- **MEDIUM-5:** VAP-null branch shares the fingerprint + intrabar guard —
+  intrabar ticks return without rewriting all bars; fingerprint/`lastKnownBars`
+  update on re-zero.
+- **LOW-1:** `maxNorm` fingerprint packing raised x100 → x1000 (0.001 quantum,
+  spec-noted). **LOW-2:** covered by sign-gated alert scan. **LOW-3:** float
+  narrowing documented in code. Spec (`EffortVsResult_BuildSpec.md` §§2-3,6-7)
+  updated to match. Gate re-run 12/12.
