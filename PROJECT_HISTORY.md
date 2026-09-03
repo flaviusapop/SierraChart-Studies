@@ -148,3 +148,25 @@ The order-flow engines have **"OTF Filter" inputs** (Arrow OTF Slot 1/2 and Conf
 ---
 
 *This note is a snapshot of file state as of 2026-05-20. Treat the code as authoritative — if anything here disagrees with the source, the source wins.*
+
+---
+
+## 2026-09-03 — Failed Aggression Map v1.0 (new standalone study)
+
+- Added `FailedAggressionMap.cpp` (`Failed Aggression Map v1.0`, `AutoLoop = 0`,
+  region 0, `MaintainVolumeAtPriceData = 1`). Existing studies untouched
+  (`TrappedTraders.cpp` / `LiquidityZones.cpp` used for VAP/drawing precedent only).
+- Closed-bar-only engine in integer ticks: rolling-window delta aggregation
+  (int64), delta-weighted centroid, confirm-by-adverse-displacement with deadline
+  discard, first-retest-from-displaced-side, exit-based failed retest,
+  far-edge acceptance-through. Sequential engine so full recalc reproduces live.
+- Threshold modes Manual (95/350) / Auto (median of daily p85/p80 over 5 prior
+  complete Sierra trading days, cached per day, warmup warning) / Both (Manual
+  precedence on inclusive-tick intersection; same-side/source merge adds totals).
+- 4 rendering modes (Bubble+Ribbon default, Glyphs, Legacy Rectangle, combined);
+  ordinary (non-user-drawn) UseTool namespace deleted via
+  `DeleteACSChartDrawing(TOOL_DELETE_CHARTDRAWING)`; 14 SGs; 23 inputs; live-only
+  watermarked alerts; fixed-capacity (128) persistent state freed on
+  `LastCallToFunction`.
+- Spec: `FailedAggressionMap_BuildSpec.md`. Static gate 12/12 on Linux.
+  NOT yet compiled in Sierra Chart — needs F5 compile + replay validation.
