@@ -182,9 +182,11 @@ The order-flow engines have **"OTF Filter" inputs** (Arrow OTF Slot 1/2 and Conf
   only (M-5); centroid uses exact integer rounding incl. negative-safe
   tick conversion (L-1/L-2).
 - Spec aligned: SG12 POINT / SG13 DIAMOND table (M-6), 23-input heading (L-4),
-  alert semantics + H-1 fallback documented. H-1 kept per task
-  (`SetChartStudySubgraphValues`, fallback noted for F5).
-- Gate 12/12 on Linux (1262 lines). Still NOT Sierra-compiled — F5 + replay
+  alert semantics documented. Exact Zander `SC_DLL_VERSION 2927` header audit then
+  fixed two compile blockers: `DRAWING_ELLIPSEHIGHLIGHT` replaces the nonexistent
+  `DRAWING_ELLIPSE`, and `SetChartStudySubgraphValues` uses its required 3-argument
+  Chart/Study/Subgraph form.
+- Gate 12/12 on Linux (1266 lines). Still NOT Sierra-compiled — F5 + replay
   checklist in the review Sec. 4 remains.
 
 ## 2026-09-03 — EffortVsResult v1.0 (new standalone study)
@@ -237,3 +239,6 @@ documented) and MEDIUM-3 core (pattern already correct).
   spec-noted). **LOW-2:** covered by sign-gated alert scan. **LOW-3:** float
   narrowing documented in code. Spec (`EffortVsResult_BuildSpec.md` §§2-3,6-7)
   updated to match. Gate re-run 12/12.
+- Exact Zander `SC_DLL_VERSION 2927` header audit found no ACSIL API mismatches;
+  details are in `EffortVsResult_HeaderAudit.md`. Sierra F5 compile and replay
+  remain required before live use.
