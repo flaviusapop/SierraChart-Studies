@@ -242,3 +242,44 @@ documented) and MEDIUM-3 core (pattern already correct).
 - Exact Zander `SC_DLL_VERSION 2927` header audit found no ACSIL API mismatches;
   details are in `EffortVsResult_HeaderAudit.md`. Sierra F5 compile and replay
   remain required before live use.
+
+## 2026-09-04 — EffortVsResultEvaluator v1.0 (new companion study, TDD)
+
+New files: `EffortVsResultEvaluator.cpp`,
+`tests/test_effort_vs_result_evaluator.cpp`,
+`tests/run_effort_vs_result_evaluator_tests.sh`,
+`EffortVsResultEvaluator_TDD.md`. `EffortVsResult.cpp` untouched.
+
+- **What it is:** same-chart event-study evaluator for `EffortVsResult.cpp`
+  (function `scsf_EffortVsResultEvaluator`, `AutoLoop = 0`, region 1, 18
+  `DRAWSTYLE_IGNORE` SGs, 15 inputs). Reads canonical source SGs
+  2/5/6/7/8/9/10 via `GetStudyArrayFromChartUsingID` once per call; never
+  recomputes effort/reward/failure. Buyer failure = short, seller = long;
+  candidate bar is `j-1`; same-bar dual-side = conflict (`-5`); forming bar
+  never a signal/outcome source.
+- **Mechanics:** Next-Open / Confirmation-Close entry with traversal always
+  from `j+1`; candidate-extreme stops + `TargetR` targets; elapsed-time
+  horizon (default 15 min) with right-edge censoring as `-4` (never a
+  timeout); Mark/Exclude vs Stop-First vs Target-First ambiguity; MFE/MAE in
+  R units; Include+Flag vs Exclude overlap with chronological prior-exit
+  state; session filter with midnight crossing; YYYYMMDD bounds with
+  leap-aware validation; cumulative included/avg-R/win-rate SGs; one-shot
+  full-recalc/settings-rebuild-only CSV export under `DataFilesFolder()`
+  via temp-file + backup/restore replacement with
+  `[A-Za-z0-9_.-]` sanitization and `GetBarPeriodParameters` columns.
+  Full-recalc/settings-rebuild-only evaluation — ordinary updates do not
+  rescan. Persistent slots 4-6 only (structural fingerprint, CSV
+  enable/prefix excluded); no heap, no STL, no static mutable state, no
+  float equality on prices, one config message per invalid setup (not per
+  bar).
+- **Verification:** vertical TDD per spec §13 — RED was a missing-file
+  compile failure, then a horizon-censoring probe (`status=-4`) proving the
+  fixture needed a horizon-covering tape; full suite covers all 12 spec
+  areas. Final portable result: `checks=103 fails=0, ALL EVR EVALUATOR TESTS
+  PASSED`, warning-free under `-Wall -Wextra`. Self-checks: one
+  `SCSFExport`, max SG index 17, all 15 inputs defaulted and read; ACSIL
+  surface limited to repo-precedent APIs verified against the Zander SC_DLL_VERSION 2927 cached headers.
+- **Completed:** official static gate 12/12, Zander header/API audit PASS,
+  independent review PASS with no blockers. Only Sierra F5 compilation and
+  on-chart runtime validation remain outstanding; historical ranking itself
+  does not require replay.
