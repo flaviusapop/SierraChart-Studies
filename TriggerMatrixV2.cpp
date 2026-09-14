@@ -3,7 +3,7 @@ SCDLLName("TriggerMatrixV2")
 
 // =============================================================================
 // TriggerMatrixV2.cpp
-// Sierra Chart ACSIL Custom Study — Trigger Matrix V2 Self-Contained v2.3
+// Sierra Chart ACSIL Custom Study — Trigger Matrix V2 Self-Contained v2.4
 //
 // Self-contained study: computes ALL role-relevant data internally from the
 // current chart native OHLC, bid/ask volume (SC_ASKVOL/SC_BIDVOL) and Volume
@@ -84,6 +84,8 @@ SCDLLName("TriggerMatrixV2")
 //   32/33 Long Trigger / Short Trigger (HTML withContext) ord 20 Renko 8t
 //   34/35 T BUY / T SELL (HTML withContext)            ord 21 Renko 8t
 //   36/37 R BUY / R SELL (HTML withContext)            ord 22 Renko 8t
+//   38 Long Level 1 / 39 Long Level 2 (ARROW, V1 BLOCK Z)
+//   40 Short Level 1 / 41 Short Level 2
 //   50..56 hidden indicator workspace (DRAWSTYLE_IGNORE)
 //
 // Producer index convention (catalog pin only; no external studies):
@@ -119,10 +121,10 @@ SCDLLName("TriggerMatrixV2")
 // Indexing convention: offset 0 = current completed bar, k = k bars prior.
 // ---------------------------------------------------------------------------
 
-#define TMV2_VERSION "2.3-self-contained"
+#define TMV2_VERSION "2.4-self-contained"
 #define TMV2_CATALOG_VERSION "2.0.0-research-2026-09-09"
 #define TMV2_CATALOG_SHA "ea562e4789cc16bae2f3529882a9832d1ba8d1a0dd9d95fbb02088f8f5a08618"
-#define TMV2_SCHEMA_VERSION 5
+#define TMV2_SCHEMA_VERSION 6
 
 #define TMV2_ROLE_RANGE 0
 #define TMV2_ROLE_RENKO6 1
@@ -142,6 +144,10 @@ SCDLLName("TriggerMatrixV2")
 #define TMV2_FNV_OFFSET_BASIS 14695981039346656037ULL
 #define TMV2_N_PRIMARY 32
 #define TMV2_N_OUT 38
+#define TMV2_SG_LONG_LV1 38
+#define TMV2_SG_LONG_LV2 39
+#define TMV2_SG_SHORT_LV1 40
+#define TMV2_SG_SHORT_LV2 41
 #define TMV2_ORD_LTR 20
 #define TMV2_ORD_TBY 21
 #define TMV2_ORD_RBY 22
@@ -1840,6 +1846,38 @@ static double Tmv2_StackY(int isBull, int lane, double low, double high,
     return high + (baseTicks + lane * stepTicks) * tick;
 }
 
+// V1 BLOCK Z: count published detectors this bar. Skip Core SGs 24-29 so
+// Long Trigger / T BUY / R BUY withContext is not double-counted.
+static int Tmv2_LevelCountBar(const int fired[TMV2_N_OUT], int isBull)
+{
+    int n = 0;
+    for (int s = isBull ? 0 : 1; s < TMV2_N_OUT; s += 2)
+    {
+        if (s >= 24 && s <= 29) continue;
+        if (fired[s]) n++;
+    }
+    return n;
+}
+
+// V1 window 0 skipped the loop (never fired). Treat 0 as current bar.
+static int Tmv2_LevelWindowSum(const int* perBar, int i, int window)
+{
+    int w = window;
+    if (w < 1) w = 1;
+    int sum = 0;
+    for (int b = i; b >= i - w + 1 && b >= 0; b--)
+        sum += perBar[b];
+    return sum;
+}
+
+// Highest threshold wins (V1: lv2 else lv1).
+static int Tmv2_LevelTier(int count, int lv1, int lv2)
+{
+    if (count >= lv2) return 2;
+    if (count >= lv1) return 1;
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // 64-bit FNV-1a structural fingerprint over schema, catalog pin, role,
 // VAP gate (actual multiplier == 1), ACTUAL VolumeAtPriceMultiplier,
@@ -1969,6 +2007,11 @@ SCSFExport scsf_TriggerMatrixV2(SCStudyInterfaceRef sc)
     SCInputRef In_BullBase = sc.Input[1];
     SCInputRef In_BearBase = sc.Input[2];
     SCInputRef In_Step     = sc.Input[3];
+    SCInputRef In_LvWindow = sc.Input[4];
+    SCInputRef In_Lv1Min   = sc.Input[5];
+    SCInputRef In_Lv2Min   = sc.Input[6];
+    SCInputRef In_LvOff    = sc.Input[7];
+    SCInputRef In_HideTrig = sc.Input[8];
     SCSubgraphRef IndEma50  = sc.Subgraph[50];
     SCSubgraphRef IndMacdF  = sc.Subgraph[51];
     SCSubgraphRef IndAdx    = sc.Subgraph[52];
@@ -1979,10 +2022,11 @@ SCSFExport scsf_TriggerMatrixV2(SCStudyInterfaceRef sc)
 
     if (sc.SetDefaults)
     {
-        sc.GraphName = "Trigger Matrix V2 Self-Contained v2.3";
+        sc.GraphName = "Trigger Matrix V2 Self-Contained v2.4";
         sc.StudyDescription =
             "V1 names, HTML v2 formulas (catalog 2.0.0-research-2026-09-09). "
             "16 primary families SG0-31 plus Long Trigger / T BUY / R BUY withContext SG32-37. "
+            "Long/Short Level 1/2 confluence arrows SG38-41 (V1 BLOCK Z). "
             "Internal OHLC/AV/BV/VAP. No external studies. One instance per chart role. "
             "No alerts, no trading.";
         sc.AutoLoop = 0;
@@ -2110,6 +2154,28 @@ SCSFExport scsf_TriggerMatrixV2(SCStudyInterfaceRef sc)
             sc.Subgraph[sgR].DrawZeros = 0;
         }
 
+        // V1 Level 1/2 confluence arrows (not stacked with detectors).
+        sc.Subgraph[TMV2_SG_LONG_LV1].Name = "Long Level 1";
+        sc.Subgraph[TMV2_SG_LONG_LV1].DrawStyle = DRAWSTYLE_ARROW_UP;
+        sc.Subgraph[TMV2_SG_LONG_LV1].PrimaryColor = RGB(220, 220, 220);
+        sc.Subgraph[TMV2_SG_LONG_LV1].LineWidth = 6;
+        sc.Subgraph[TMV2_SG_LONG_LV1].DrawZeros = 0;
+        sc.Subgraph[TMV2_SG_LONG_LV2].Name = "Long Level 2";
+        sc.Subgraph[TMV2_SG_LONG_LV2].DrawStyle = DRAWSTYLE_ARROW_UP;
+        sc.Subgraph[TMV2_SG_LONG_LV2].PrimaryColor = RGB(255, 165, 0);
+        sc.Subgraph[TMV2_SG_LONG_LV2].LineWidth = 6;
+        sc.Subgraph[TMV2_SG_LONG_LV2].DrawZeros = 0;
+        sc.Subgraph[TMV2_SG_SHORT_LV1].Name = "Short Level 1";
+        sc.Subgraph[TMV2_SG_SHORT_LV1].DrawStyle = DRAWSTYLE_ARROW_DOWN;
+        sc.Subgraph[TMV2_SG_SHORT_LV1].PrimaryColor = RGB(220, 220, 220);
+        sc.Subgraph[TMV2_SG_SHORT_LV1].LineWidth = 6;
+        sc.Subgraph[TMV2_SG_SHORT_LV1].DrawZeros = 0;
+        sc.Subgraph[TMV2_SG_SHORT_LV2].Name = "Short Level 2";
+        sc.Subgraph[TMV2_SG_SHORT_LV2].DrawStyle = DRAWSTYLE_ARROW_DOWN;
+        sc.Subgraph[TMV2_SG_SHORT_LV2].PrimaryColor = RGB(255, 165, 0);
+        sc.Subgraph[TMV2_SG_SHORT_LV2].LineWidth = 6;
+        sc.Subgraph[TMV2_SG_SHORT_LV2].DrawZeros = 0;
+
         // Hidden indicator workspace (Renko 8t withContext). Not outputs.
         sc.Subgraph[50].Name = "IND EMA50/200";
         sc.Subgraph[51].Name = "IND MACD";
@@ -2137,6 +2203,20 @@ SCSFExport scsf_TriggerMatrixV2(SCStudyInterfaceRef sc)
         In_Step.Name = "Stack Step (ticks, display only)";
         In_Step.SetInt(3);
         In_Step.SetIntLimits(1, 50);
+        In_LvWindow.Name = "Level Signal Window (bars)";
+        In_LvWindow.SetInt(1);
+        In_LvWindow.SetIntLimits(0, 50);
+        In_Lv1Min.Name = "Level 1 Min Triggers";
+        In_Lv1Min.SetInt(3);
+        In_Lv1Min.SetIntLimits(1, 20);
+        In_Lv2Min.Name = "Level 2 Min Triggers";
+        In_Lv2Min.SetInt(6);
+        In_Lv2Min.SetIntLimits(1, 20);
+        In_LvOff.Name = "Level Signal Offset (ticks)";
+        In_LvOff.SetInt(3);
+        In_LvOff.SetIntLimits(0, 50);
+        In_HideTrig.Name = "Hide Trigger Arrows";
+        In_HideTrig.SetYesNo(0);
         return;
     }
 
@@ -2145,6 +2225,11 @@ SCSFExport scsf_TriggerMatrixV2(SCStudyInterfaceRef sc)
     const int bullBase = In_BullBase.GetInt();
     const int bearBase = In_BearBase.GetInt();
     const int stepTicks = In_Step.GetInt();
+    const int lvWindow = In_LvWindow.GetInt();
+    const int lv1Min = In_Lv1Min.GetInt();
+    const int lv2Min = In_Lv2Min.GetInt();
+    const int lvOff = In_LvOff.GetInt();
+    const int hideTrig = In_HideTrig.GetYesNo() ? 1 : 0;
     const float tickF = sc.TickSize;
 
     // Family-5 VAP gate: actual chart multiplier must be 1. No user claim.
@@ -2160,6 +2245,12 @@ SCSFExport scsf_TriggerMatrixV2(SCStudyInterfaceRef sc)
     unsigned long long fp = Tmv2_Fingerprint(role, vapGate, vapMultActual,
                                             bullBase, bearBase, stepTicks,
                                             (unsigned long long)tickBits32);
+    Tmv2_FnvMix(&fp, (unsigned long long)lvWindow);
+    Tmv2_FnvMix(&fp, (unsigned long long)lv1Min);
+    Tmv2_FnvMix(&fp, (unsigned long long)lv2Min);
+    Tmv2_FnvMix(&fp, (unsigned long long)lvOff);
+    Tmv2_FnvMix(&fp, (unsigned long long)hideTrig);
+    if (fp == 0) fp = 0x9e3779b97f4a7c15ULL;
     int fpLo = 0, fpHi = 0;
     Tmv2_FingerprintSplit(fp, &fpLo, &fpHi);
     int& storedLo = sc.GetPersistentInt(4);
@@ -2215,7 +2306,13 @@ SCSFExport scsf_TriggerMatrixV2(SCStudyInterfaceRef sc)
     if (!hasWork)
     {
         if (sc.ArraySize > 0)
+        {
             for (int s = 0; s < TMV2_N_OUT; s++) sc.Subgraph[s][sc.ArraySize - 1] = 0.0f;
+            sc.Subgraph[TMV2_SG_LONG_LV1][sc.ArraySize - 1] = 0.0f;
+            sc.Subgraph[TMV2_SG_LONG_LV2][sc.ArraySize - 1] = 0.0f;
+            sc.Subgraph[TMV2_SG_SHORT_LV1][sc.ArraySize - 1] = 0.0f;
+            sc.Subgraph[TMV2_SG_SHORT_LV2][sc.ArraySize - 1] = 0.0f;
+        }
         return;
     }
 
@@ -2238,6 +2335,10 @@ SCSFExport scsf_TriggerMatrixV2(SCStudyInterfaceRef sc)
     for (int i = first; i <= lastClosed; i++)
     {
         for (int s = 0; s < TMV2_N_OUT; s++) sc.Subgraph[s][i] = 0.0f;
+        sc.Subgraph[TMV2_SG_LONG_LV1][i] = 0.0f;
+        sc.Subgraph[TMV2_SG_LONG_LV2][i] = 0.0f;
+        sc.Subgraph[TMV2_SG_SHORT_LV1][i] = 0.0f;
+        sc.Subgraph[TMV2_SG_SHORT_LV2][i] = 0.0f;
         if (!baseOK) continue;
 
         // Compact 31-deep native history ending at i (short prefixes on
@@ -2362,17 +2463,44 @@ SCSFExport scsf_TriggerMatrixV2(SCStudyInterfaceRef sc)
         Tmv2_StackLanes(fired, hidden, bullLane, bearLane);
         const float lo = sc.Low[i];
         const float hi = sc.High[i];
-        for (int s = 0; s < TMV2_N_OUT; s++)
+        if (!hideTrig)
         {
-            if (!fired[s]) continue;
-            const int isBull = (s % 2 == 0) ? 1 : 0;
-            int lane = isBull ? bullLane[s] : bearLane[s];
-            if (lane < 0) lane = 0; // hidden: base-position truth, no lane
-            double y = Tmv2_StackY(isBull, lane, (double)lo, (double)hi,
-                                   isBull ? bullBase : bearBase,
-                                   stepTicks, (double)tickF);
-            sc.Subgraph[s][i] = (float)y;
+            for (int s = 0; s < TMV2_N_OUT; s++)
+            {
+                if (!fired[s]) continue;
+                const int isBull = (s % 2 == 0) ? 1 : 0;
+                int lane = isBull ? bullLane[s] : bearLane[s];
+                if (lane < 0) lane = 0; // hidden: base-position truth, no lane
+                double y = Tmv2_StackY(isBull, lane, (double)lo, (double)hi,
+                                       isBull ? bullBase : bearBase,
+                                       stepTicks, (double)tickF);
+                sc.Subgraph[s][i] = (float)y;
+            }
         }
+
+        // V1 BLOCK Z: persist per-bar counts then window-sum. Hide does not
+        // zero Arrays[0], so lookback still works.
+        const int bullAtI = Tmv2_LevelCountBar(fired, 1);
+        const int bearAtI = Tmv2_LevelCountBar(fired, 0);
+        sc.Subgraph[TMV2_SG_LONG_LV1].Arrays[0][i] = (float)bullAtI;
+        sc.Subgraph[TMV2_SG_SHORT_LV1].Arrays[0][i] = (float)bearAtI;
+        int wUse = lvWindow;
+        if (wUse < 1) wUse = 1;
+        int bullCount = 0;
+        int bearCount = 0;
+        for (int b = i; b >= i - wUse + 1 && b >= 0; b--)
+        {
+            bullCount += (int)sc.Subgraph[TMV2_SG_LONG_LV1].Arrays[0][b];
+            bearCount += (int)sc.Subgraph[TMV2_SG_SHORT_LV1].Arrays[0][b];
+        }
+        const int bullTier = Tmv2_LevelTier(bullCount, lv1Min, lv2Min);
+        const int bearTier = Tmv2_LevelTier(bearCount, lv1Min, lv2Min);
+        const float lvYBull = lo - (float)lvOff * tickF;
+        const float lvYBear = hi + (float)lvOff * tickF;
+        if (bullTier == 2) sc.Subgraph[TMV2_SG_LONG_LV2][i] = lvYBull;
+        else if (bullTier == 1) sc.Subgraph[TMV2_SG_LONG_LV1][i] = lvYBull;
+        if (bearTier == 2) sc.Subgraph[TMV2_SG_SHORT_LV2][i] = lvYBear;
+        else if (bearTier == 1) sc.Subgraph[TMV2_SG_SHORT_LV1][i] = lvYBear;
     }
 
     // Bounded late-VAP retry: remember the earliest unresolved volume bar
@@ -2387,6 +2515,10 @@ SCSFExport scsf_TriggerMatrixV2(SCStudyInterfaceRef sc)
     vapRows = 0;
 
     for (int s = 0; s < TMV2_N_OUT; s++) sc.Subgraph[s][sc.ArraySize - 1] = 0.0f;
+    sc.Subgraph[TMV2_SG_LONG_LV1][sc.ArraySize - 1] = 0.0f;
+    sc.Subgraph[TMV2_SG_LONG_LV2][sc.ArraySize - 1] = 0.0f;
+    sc.Subgraph[TMV2_SG_SHORT_LV1][sc.ArraySize - 1] = 0.0f;
+    sc.Subgraph[TMV2_SG_SHORT_LV2][sc.ArraySize - 1] = 0.0f;
 }
 
 #endif // TMV2_UNITTEST
