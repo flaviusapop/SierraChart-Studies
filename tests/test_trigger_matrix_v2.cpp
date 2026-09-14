@@ -127,6 +127,8 @@ static void T01_Ledger()
     CHECK(Tmv2_FamilyRole(20) == 2 && Tmv2_FamilySgBull(20) == 32, "LTR SG32 Renko8");
     CHECK(Tmv2_FamilyRole(21) == 2 && Tmv2_FamilySgBull(21) == 34, "TBY SG34 Renko8");
     CHECK(Tmv2_FamilyRole(22) == 2 && Tmv2_FamilySgBull(22) == 36, "RBY SG36 Renko8");
+    CHECK(TMV2_SG_LONG_LV1 == 38 && TMV2_SG_LONG_LV2 == 39, "Long Level SGs");
+    CHECK(TMV2_SG_SHORT_LV1 == 40 && TMV2_SG_SHORT_LV2 == 41, "Short Level SGs");
     CHECK(std::string(Tmv2_FamilyCode(20)) == "LTR", "code LTR");
     CHECK(std::string(Tmv2_FamilyCode(21)) == "TBY", "code TBY");
     CHECK(std::string(Tmv2_FamilyCode(22)) == "RBY", "code RBY");
@@ -954,6 +956,34 @@ static void T28_HtmlContext()
     }
 }
 
+static void T29_LevelConfluence()
+{
+    int fired[TMV2_N_OUT];
+    for (int s = 0; s < TMV2_N_OUT; s++) fired[s] = 0;
+    CHECK(Tmv2_LevelCountBar(fired, 1) == 0 && Tmv2_LevelCountBar(fired, 0) == 0, "empty count");
+    fired[0] = fired[6] = fired[22] = 1;
+    CHECK(Tmv2_LevelCountBar(fired, 1) == 3, "three bull detectors");
+    CHECK(Tmv2_LevelCountBar(fired, 0) == 0, "bear still zero");
+    fired[24] = fired[26] = fired[28] = 1;
+    CHECK(Tmv2_LevelCountBar(fired, 1) == 3, "cores 24-29 excluded");
+    fired[32] = fired[34] = fired[36] = 1;
+    CHECK(Tmv2_LevelCountBar(fired, 1) == 6, "ctx SGs count");
+    fired[1] = fired[23] = 1;
+    CHECK(Tmv2_LevelCountBar(fired, 0) == 2, "bear independent");
+
+    int per[5] = {1, 2, 0, 3, 1};
+    CHECK(Tmv2_LevelWindowSum(per, 4, 1) == 1, "window 1 current only");
+    CHECK(Tmv2_LevelWindowSum(per, 4, 2) == 4, "window 2");
+    CHECK(Tmv2_LevelWindowSum(per, 4, 0) == 1, "window 0 means current bar");
+    CHECK(Tmv2_LevelWindowSum(per, 0, 5) == 1, "clamp at bar 0");
+
+    CHECK(Tmv2_LevelTier(2, 3, 6) == 0, "below lv1");
+    CHECK(Tmv2_LevelTier(3, 3, 6) == 1, "lv1");
+    CHECK(Tmv2_LevelTier(5, 3, 6) == 1, "between lv1 and lv2");
+    CHECK(Tmv2_LevelTier(6, 3, 6) == 2, "lv2 wins");
+    CHECK(Tmv2_LevelTier(9, 3, 6) == 2, "above lv2");
+}
+
 int main()
 {
     T01_Ledger();
@@ -984,6 +1014,7 @@ int main()
     T26_FnvBasis();
     T27_StructDisabled();
     T28_HtmlContext();
+    T29_LevelConfluence();
     if (g_fails == 0)
         std::printf("TMV2 ALL GREEN: %d checks\n", g_checks);
     else
