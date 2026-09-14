@@ -88,7 +88,7 @@ static void SetNorm(Tmv2Window& w, int k, double n, double total = 100.0)
 static void T01_Ledger()
 {
     CHECK(Tmv2_ReadyFamilyCount() == 16, "16 ready families");
-    CHECK(Tmv2_OutputCount() == 32, "32 outputs");
+    CHECK(Tmv2_OutputCount() == TMV2_N_OUT, "38 outputs");
     const int* ords = Tmv2_ReadyOrdinals();
     int seen[20] = {0};
     for (int i = 0; i < 16; i++)
@@ -124,6 +124,15 @@ static void T01_Ledger()
         if (sb >= 0) { used[sb]++; used[sr]++; }
     }
     for (int s = 0; s < 32; s++) CHECK(used[s] == 1, "SG0..31 unique");
+    CHECK(Tmv2_FamilyRole(20) == 2 && Tmv2_FamilySgBull(20) == 32, "LTR SG32 Renko8");
+    CHECK(Tmv2_FamilyRole(21) == 2 && Tmv2_FamilySgBull(21) == 34, "TBY SG34 Renko8");
+    CHECK(Tmv2_FamilyRole(22) == 2 && Tmv2_FamilySgBull(22) == 36, "RBY SG36 Renko8");
+    CHECK(std::string(Tmv2_FamilyCode(20)) == "LTR", "code LTR");
+    CHECK(std::string(Tmv2_FamilyCode(21)) == "TBY", "code TBY");
+    CHECK(std::string(Tmv2_FamilyCode(22)) == "RBY", "code RBY");
+    CHECK(Tmv2_MaxDirectFootprint(20) == 3, "fp LTR");
+    CHECK(Tmv2_MaxDirectFootprint(21) == 6, "fp TBY");
+    CHECK(Tmv2_MaxDirectFootprint(22) == 3, "fp RBY");
     // Pins
     CHECK(std::string(Tmv2_CatalogVersion()) == "2.0.0-research-2026-09-09", "catalog version pin");
     CHECK(std::string(Tmv2_CatalogSha()) == "ea562e4789cc16bae2f3529882a9832d1ba8d1a0dd9d95fbb02088f8f5a08618", "catalog sha pin");
@@ -666,21 +675,21 @@ static void T19_Fam19()
 // ---------- T20 deterministic stacking ----------
 static void T20_Stack()
 {
-    int fired[32] = {0};
-    int hidden[32] = {0};
-    int bullLane[32], bearLane[32];
+    int fired[TMV2_N_OUT] = {0};
+    int hidden[TMV2_N_OUT] = {0};
+    int bullLane[TMV2_N_OUT], bearLane[TMV2_N_OUT];
     // single bull at SG0 -> lane 0; single bear at SG1 -> lane 0
     fired[0] = 1;
     Tmv2_StackLanes(fired, hidden, bullLane, bearLane);
     CHECK(bullLane[0] == 0, "single bull lane 0");
     CHECK(bearLane[1] == -1, "bear idle -1");
-    for (int s = 0; s < 32; s++) fired[s] = 1;
+    for (int s = 0; s < TMV2_N_PRIMARY; s++) fired[s] = 1;
     Tmv2_StackLanes(fired, hidden, bullLane, bearLane);
     int expect = 0;
-    for (int s = 0; s < 32; s += 2) CHECK(bullLane[s] == expect++, "bull dense lanes");
+    for (int s = 0; s < TMV2_N_PRIMARY; s += 2) CHECK(bullLane[s] == expect++, "bull dense lanes");
     expect = 0;
-    for (int s = 1; s < 32; s += 2) CHECK(bearLane[s] == expect++, "bear dense lanes");
-    CHECK(expect == 16, "16 lanes per side");
+    for (int s = 1; s < TMV2_N_PRIMARY; s += 2) CHECK(bearLane[s] == expect++, "bear dense lanes");
+    CHECK(expect == 16, "16 primary lanes per side");
     // hidden outputs consume no lane but keep truth
     hidden[0] = 1; hidden[2] = 1;
     Tmv2_StackLanes(fired, hidden, bullLane, bearLane);
@@ -700,36 +709,34 @@ static void T20_Stack()
     }
 }
 
-// ---------- T21 fingerprint ----------
+// ---------- T21 fingerprint (v2.1: no source IDs, no revCfg) ----------
+// Signature: (role, vapFlag, vapMultActual, bullBase, bearBase, step, tickBits).
 static void T21_Fingerprint()
 {
-    int ids[11] = {4, 5, 22, 37, 55, 23, 24, 31, 0, 0, 19};
-    unsigned long long a = Tmv2_Fingerprint(0, ids, 1, 1, 2, 2, 3, 0x3E80000000000000ULL);
-    unsigned long long b = Tmv2_Fingerprint(0, ids, 1, 1, 2, 2, 3, 0x3E80000000000000ULL);
+    unsigned long long a = Tmv2_Fingerprint(0, 1, 1, 2, 2, 3, 0x3E80000000000000ULL);
+    unsigned long long b = Tmv2_Fingerprint(0, 1, 1, 2, 2, 3, 0x3E80000000000000ULL);
     CHECK(a == b && a != 0, "fingerprint deterministic nonzero");
-    int ids2[11] = {4, 5, 22, 37, 55, 23, 24, 31, 0, 0, 19};
-    ids2[3] = 38;
-    CHECK(Tmv2_Fingerprint(0, ids2, 1, 1, 2, 2, 3, 0x3E80000000000000ULL) != a, "fingerprint senses ID");
-    CHECK(Tmv2_Fingerprint(1, ids, 1, 1, 2, 2, 3, 0x3E80000000000000ULL) != a, "fingerprint senses role");
-    CHECK(Tmv2_Fingerprint(0, ids, 0, 1, 2, 2, 3, 0x3E80000000000000ULL) != a, "fingerprint senses vap flag");
-    CHECK(Tmv2_Fingerprint(0, ids, 1, 2, 2, 2, 3, 0x3E80000000000000ULL) != a, "fingerprint senses revision");
-    CHECK(Tmv2_Fingerprint(0, ids, 1, 1, 5, 2, 3, 0x3E80000000000000ULL) != a, "fingerprint senses display offset");
+    CHECK(Tmv2_Fingerprint(1, 1, 1, 2, 2, 3, 0x3E80000000000000ULL) != a, "fingerprint senses role");
+    CHECK(Tmv2_Fingerprint(0, 0, 1, 2, 2, 3, 0x3E80000000000000ULL) != a, "fingerprint senses vap flag");
+    CHECK(Tmv2_Fingerprint(0, 1, 2, 2, 2, 3, 0x3E80000000000000ULL) != a, "fingerprint senses multiplier");
+    CHECK(Tmv2_Fingerprint(0, 1, 1, 5, 2, 3, 0x3E80000000000000ULL) != a, "fingerprint senses display offset");
+    CHECK(Tmv2_Fingerprint(0, 1, 1, 2, 2, 3, 0x3E80000000000001ULL) != a, "fingerprint senses tickbits");
     int lo, hi;
     Tmv2_FingerprintSplit(a, &lo, &hi);
     CHECK(Tmv2_FingerprintJoin(lo, hi) == a, "fingerprint split/join roundtrip");
 }
 
 // ---------- T22 role dispatch (Tmv2_EvalRole) ----------
-static int CountFired(const int fired[32])
+static int CountFired(const int fired[TMV2_N_OUT])
 {
     int n = 0;
-    for (int s = 0; s < 32; s++) n += fired[s] ? 1 : 0;
+    for (int s = 0; s < TMV2_N_OUT; s++) n += fired[s] ? 1 : 0;
     return n;
 }
 
 static void T22_EvalRole()
 {
-    int fired[32];
+    int fired[TMV2_N_OUT];
     { Tmv2Window w; BuildF01Bull(w);
       CHECK(Tmv2_EvalRole(0, &w, fired) == 1 && fired[0] == 1, "role0 fires SG0");
       CHECK(CountFired(fired) == 1, "role0 exactly one");
@@ -783,22 +790,25 @@ static void T24_Warmup()
     CHECK(Tmv2_MinBarIndex(17) == 5, "warmup ord17");
     CHECK(Tmv2_MinBarIndex(18) == 2, "warmup ord18");
     CHECK(Tmv2_MinBarIndex(19) == 2, "warmup ord19");
+    CHECK(Tmv2_MinBarIndex(20) == 200, "warmup LTR ema200");
+    CHECK(Tmv2_MinBarIndex(21) == 40, "warmup TBY");
+    CHECK(Tmv2_MinBarIndex(22) == 40, "warmup RBY");
     CHECK(Tmv2_MinBarIndex(3) < 0, "warmup blocked ord3 none");
     CHECK(Tmv2_MinBarIndex(12) < 0, "warmup blocked ord12 none");
     CHECK(Tmv2_MinBarIndex(13) < 0, "warmup blocked ord13 none");
     // Gating: true predicate below threshold must clear its pair.
     { Tmv2Window w; BuildF01Bull(w);
-      int fired[32];
+      int fired[TMV2_N_OUT];
       CHECK(Tmv2_EvalRole(0, &w, fired) == 1 && fired[0] == 1, "warmup setup fires");
-      int gated[32];
+      int gated[TMV2_N_OUT];
       CHECK(Tmv2_EvalRoleAt(0, &w, 2, gated) == 0 && gated[0] == 0 && gated[1] == 0, "warmup ord1 cleared at bar 2");
       CHECK(Tmv2_EvalRoleAt(0, &w, 3, gated) == 1 && gated[0] == 1, "warmup ord1 kept at bar 3"); }
     { Tmv2Window w; BuildF07Bull(w);
-      int gated[32];
+      int gated[TMV2_N_OUT];
       CHECK(Tmv2_EvalRoleAt(0, &w, 21, gated) == 0 && gated[10] == 0, "warmup ord7 cleared at bar 21");
       CHECK(Tmv2_EvalRoleAt(0, &w, 22, gated) == 1 && gated[10] == 1, "warmup ord7 kept at bar 22"); }
     { Tmv2Window w; BuildF08Bull(w);
-      int gated[32];
+      int gated[TMV2_N_OUT];
       CHECK(Tmv2_EvalRoleAt(0, &w, 19, gated) == 0 && gated[12] == 0, "warmup ord8 cleared at bar 19");
       CHECK(Tmv2_EvalRoleAt(0, &w, 20, gated) == 1 && gated[12] == 1, "warmup ord8 kept at bar 20"); }
 }
@@ -822,26 +832,12 @@ static void T26_FnvBasis()
     CHECK(Tmv2_FnvOffsetBasis() == 14695981039346656037ULL, "FNV-1a 64-bit offset basis");
 }
 
-// ---------- T27 structural-disabled summary helper ----------
-// Pure helper contract: given role + structural presence (have[i] = IDs>0)
-// + VAP precondition, report disabled ready ordinals in ascending catalog
-// order. Used to build the one-per-fingerprint role-specific Message Log
-// summary. Dynamic per-bar empty/short arrays are NOT structural and must
-// keep failing closed silently (no log).
-static void T27_HaveAll(int have[11])
-{
-    for (int i = 0; i < 11; i++) have[i] = 1;
-}
-
-static int T27_Contains(const int* arr, int n, int ord)
-{
-    for (int i = 0; i < n; i++) if (arr[i] == ord) return 1;
-    return 0;
-}
-
+// ---------- T27 self-contained structural gate ----------
+// v2.1: no external source studies, no retired-slot labels. Family codes
+// stay pinned for the log. Tmv2_SelfDisabled reports only the family-5
+// VAP gate (Range + actual multiplier != 1 -> ord5).
 static void T27_StructDisabled()
 {
-    int have[11];
     int disabled[16];
     int n = 0;
     // Family-code pins (each disabled ordinal must name its code in the log).
@@ -861,86 +857,101 @@ static void T27_StructDisabled()
     CHECK(std::string(Tmv2_FamilyCode(17)) == "PEV", "code ord17 PEV");
     CHECK(std::string(Tmv2_FamilyCode(18)) == "R8F", "code ord18 R8F");
     CHECK(std::string(Tmv2_FamilyCode(19)) == "FPR", "code ord19 FPR");
-    // Source-label pins (each missing input must be named in the log).
-    CHECK(std::string(Tmv2_SrcLabel(0)) == "RDelta", "src0 RDelta");
-    CHECK(std::string(Tmv2_SrcLabel(1)) == "RBands", "src1 RBands");
-    CHECK(std::string(Tmv2_SrcLabel(2)) == "RVpA", "src2 RVpA");
-    CHECK(std::string(Tmv2_SrcLabel(3)) == "RVpB", "src3 RVpB");
-    CHECK(std::string(Tmv2_SrcLabel(4)) == "RVA", "src4 RVA");
-    CHECK(std::string(Tmv2_SrcLabel(5)) == "R6Delta", "src5 R6Delta");
-    CHECK(std::string(Tmv2_SrcLabel(6)) == "R6Bands", "src6 R6Bands");
-    CHECK(std::string(Tmv2_SrcLabel(7)) == "R6Vp", "src7 R6Vp");
-    CHECK(std::string(Tmv2_SrcLabel(8)) == "R6AskD", "src8 R6AskD");
-    CHECK(std::string(Tmv2_SrcLabel(9)) == "R6BidD", "src9 R6BidD");
-    CHECK(std::string(Tmv2_SrcLabel(10)) == "R8Vp", "src10 R8Vp");
-    // Range full config -> none disabled.
-    { T27_HaveAll(have); n = Tmv2_StructDisabled(0, have, 1, disabled);
-      CHECK(n == 0, "range full none disabled"); }
-    // Range VAP precondition gates only ord5.
-    { T27_HaveAll(have); n = Tmv2_StructDisabled(0, have, 0, disabled);
-      CHECK(n == 1 && disabled[0] == 5, "range vap0 disables ord5 only"); }
-    // Range missing RDelta disables 7,8,10,11 only.
-    { T27_HaveAll(have); have[0] = 0; n = Tmv2_StructDisabled(0, have, 1, disabled);
-      CHECK(n == 4, "range no-RDelta count 4");
-      CHECK(T27_Contains(disabled, n, 7) && T27_Contains(disabled, n, 8) &&
-            T27_Contains(disabled, n, 10) && T27_Contains(disabled, n, 11),
-            "range no-RDelta set 7,8,10,11");
-      CHECK(!T27_Contains(disabled, n, 6) && !T27_Contains(disabled, n, 9) &&
-            !T27_Contains(disabled, n, 19), "range no-RDelta spares 6,9,19"); }
-    // Range missing RBands alone disables the same 7,8,10,11.
-    { T27_HaveAll(have); have[1] = 0; n = Tmv2_StructDisabled(0, have, 1, disabled);
-      CHECK(n == 4 && T27_Contains(disabled, n, 7) && T27_Contains(disabled, n, 8) &&
-            T27_Contains(disabled, n, 10) && T27_Contains(disabled, n, 11),
-            "range no-RBands set 7,8,10,11"); }
-    // Range missing RVpA disables 6,10,11.
-    { T27_HaveAll(have); have[2] = 0; n = Tmv2_StructDisabled(0, have, 1, disabled);
-      CHECK(n == 3, "range no-RVpA count 3");
-      CHECK(T27_Contains(disabled, n, 6) && T27_Contains(disabled, n, 10) &&
-            T27_Contains(disabled, n, 11), "range no-RVpA set 6,10,11");
-      CHECK(!T27_Contains(disabled, n, 7) && !T27_Contains(disabled, n, 8),
-            "range no-RVpA spares 7,8"); }
-    // Range missing RVpB disables 7,8,9,19.
-    { T27_HaveAll(have); have[3] = 0; n = Tmv2_StructDisabled(0, have, 1, disabled);
-      CHECK(n == 4, "range no-RVpB count 4");
-      CHECK(T27_Contains(disabled, n, 7) && T27_Contains(disabled, n, 8) &&
-            T27_Contains(disabled, n, 9) && T27_Contains(disabled, n, 19),
-            "range no-RVpB set 7,8,9,19"); }
-    // Range missing RVA disables 6,10,11,19.
-    { T27_HaveAll(have); have[4] = 0; n = Tmv2_StructDisabled(0, have, 1, disabled);
-      CHECK(n == 4, "range no-RVA count 4");
-      CHECK(T27_Contains(disabled, n, 6) && T27_Contains(disabled, n, 10) &&
-            T27_Contains(disabled, n, 11) && T27_Contains(disabled, n, 19),
-            "range no-RVA set 6,10,11,19"); }
-    // Range native-only families stay enabled even when everything is missing.
-    { for (int i = 0; i < 11; i++) have[i] = 0;
-      n = Tmv2_StructDisabled(0, have, 0, disabled);
-      CHECK(!T27_Contains(disabled, n, 1) && !T27_Contains(disabled, n, 2) &&
-            !T27_Contains(disabled, n, 4), "range native 1,2,4 stay enabled"); }
-    // Renko6 full config -> none disabled.
-    { T27_HaveAll(have); n = Tmv2_StructDisabled(1, have, 0, disabled);
-      CHECK(n == 0, "r6 full none disabled"); }
-    // Renko6 missing core (delta/bands/vpoc) disables 14+15.
-    { T27_HaveAll(have); have[5] = 0; n = Tmv2_StructDisabled(1, have, 0, disabled);
-      CHECK(n == 2 && T27_Contains(disabled, n, 14) && T27_Contains(disabled, n, 15),
-            "r6 no-delta disables 14+15"); }
-    { T27_HaveAll(have); have[6] = 0; n = Tmv2_StructDisabled(1, have, 0, disabled);
-      CHECK(n == 2 && T27_Contains(disabled, n, 14) && T27_Contains(disabled, n, 15),
-            "r6 no-bands disables 14+15"); }
-    { T27_HaveAll(have); have[7] = 0; n = Tmv2_StructDisabled(1, have, 0, disabled);
-      CHECK(n == 2 && T27_Contains(disabled, n, 14) && T27_Contains(disabled, n, 15),
-            "r6 no-vpoc disables 14+15"); }
-    // Renko6 missing either diagonal disables 14 only (15 survives).
-    { T27_HaveAll(have); have[8] = 0; n = Tmv2_StructDisabled(1, have, 0, disabled);
-      CHECK(n == 1 && disabled[0] == 14, "r6 no-askD disables 14 only"); }
-    { T27_HaveAll(have); have[9] = 0; n = Tmv2_StructDisabled(1, have, 0, disabled);
-      CHECK(n == 1 && disabled[0] == 14, "r6 no-bidD disables 14 only"); }
-    // Renko8 full config -> none disabled; missing VPOC disables 16+17 only.
-    { T27_HaveAll(have); n = Tmv2_StructDisabled(2, have, 0, disabled);
-      CHECK(n == 0, "r8 full none disabled"); }
-    { T27_HaveAll(have); have[10] = 0; n = Tmv2_StructDisabled(2, have, 0, disabled);
-      CHECK(n == 2 && T27_Contains(disabled, n, 16) && T27_Contains(disabled, n, 17),
-            "r8 no-vpoc disables 16+17");
-      CHECK(!T27_Contains(disabled, n, 18), "r8 native ord18 stays enabled"); }
+    // Self-contained gate: only the family-5 VAP gate disables anything.
+    { n = Tmv2_SelfDisabled(0, 1, disabled);
+      CHECK(n == 0, "range gate-on none disabled"); }
+    { n = Tmv2_SelfDisabled(0, 0, disabled);
+      CHECK(n == 1 && disabled[0] == 5, "range gate-off disables ord5 only"); }
+    { n = Tmv2_SelfDisabled(1, 0, disabled);
+      CHECK(n == 0, "r6 gate-off none disabled"); }
+    { n = Tmv2_SelfDisabled(1, 1, disabled);
+      CHECK(n == 0, "r6 gate-on none disabled"); }
+    { n = Tmv2_SelfDisabled(2, 0, disabled);
+      CHECK(n == 0, "r8 gate-off none disabled"); }
+    { n = Tmv2_SelfDisabled(99, 0, disabled);
+      CHECK(n == 0, "unknown role none disabled"); }
+}
+
+
+static void FillLtrBullCtx(Tmv2Window& w)
+{
+    w.Macd[0] = -0.5; w.macdOk[0] = 1;
+    w.Ema50[0] = 101.0; w.Ema200[0] = 100.0; w.emaOk[0] = 1;
+    w.Adx[0] = 21.0; w.adxOk[0] = 1;
+    w.Smi[0] = -61.0; w.smiOk[0] = 1;
+}
+
+static void FillTbyBullCtx(Tmv2Window& w)
+{
+    w.Adx[0] = 26.0; w.adxOk[0] = 1;
+    w.StochK[0] = 19.0; w.StochD[0] = 18.0; w.stochOk[0] = 1;
+    w.StochK[1] = 15.0; w.StochD[1] = 16.0; w.stochOk[1] = 1;
+    w.Smi[0] = -61.0; w.smiOk[0] = 1;
+}
+
+static void FillRbyBullCtx(Tmv2Window& w)
+{
+    w.Adx[0] = 19.0; w.adxOk[0] = 1;
+    w.Rsi[0] = 29.0; w.rsiOk[0] = 1;
+    w.BbLo[0] = 101.0; w.BbUp[0] = 110.0; w.bbOk[0] = 1;
+    w.C[0] = 100.5; // still must satisfy core close-in-outer-25%
+    w.Smi[0] = -61.0; w.smiOk[0] = 1;
+}
+
+static void T28_HtmlContext()
+{
+    {
+        Tmv2Window w; BuildF16Bull(w);
+        CHECK(Tmv2_F16Bull(&w) == 1, "ltr core bull");
+        CHECK(Tmv2_F16BullCtx(&w) == 0, "ltr ctx fail closed without inds");
+        int fired[TMV2_N_OUT];
+        CHECK(Tmv2_EvalRole(2, &w, fired) == 1 && fired[24] == 1 && fired[32] == 0, "ltr core only SG24");
+        FillLtrBullCtx(w);
+        CHECK(Tmv2_F16BullCtx(&w) == 1, "ltr ctx true");
+        CHECK(Tmv2_EvalRole(2, &w, fired) == 2 && fired[24] == 1 && fired[32] == 1, "ltr fires SG24+32");
+        { Tmv2Window v = w; v.macdOk[0] = 0; CHECK(Tmv2_F16BullCtx(&v) == 0, "ltr missing macd"); }
+        { Tmv2Window v = w; v.Macd[0] = 0.1; CHECK(Tmv2_F16BullCtx(&v) == 0, "ltr macd not below zero"); }
+        { Tmv2Window v = w; v.Adx[0] = 20.0; CHECK(Tmv2_F16BullCtx(&v) == 0, "ltr adx not >20"); }
+        Tmv2Window m; MirrorWindow(w, m);
+        m.Macd[0] = 0.5; m.macdOk[0] = 1;
+        m.Ema50[0] = 99.0; m.Ema200[0] = 100.0; m.emaOk[0] = 1;
+        m.Adx[0] = 21.0; m.adxOk[0] = 1;
+        m.Smi[0] = 61.0; m.smiOk[0] = 1;
+        CHECK(Tmv2_F16BearCtx(&m) == 1, "ltr bear ctx mirror");
+        int gated[TMV2_N_OUT];
+        CHECK(Tmv2_EvalRoleAt(2, &w, 199, gated) == 1 && gated[32] == 0 && gated[24] == 1, "ltr warmup clears SG32 keeps VXC");
+        CHECK(Tmv2_EvalRoleAt(2, &w, 200, gated) == 2 && gated[32] == 1, "ltr warmup kept at 200");
+    }
+    {
+        Tmv2Window w; BuildF17Bull(w);
+        CHECK(Tmv2_F17BullCtx(&w) == 0, "tby ctx fail closed");
+        FillTbyBullCtx(w);
+        CHECK(Tmv2_F17BullCtx(&w) == 1, "tby ctx true");
+        int fired[TMV2_N_OUT];
+        CHECK(Tmv2_EvalRole(2, &w, fired) == 2 && fired[26] == 1 && fired[34] == 1, "tby fires SG26+34");
+        { Tmv2Window v = w; v.StochK[0] = 20.0; CHECK(Tmv2_F17BullCtx(&v) == 0, "tby k not <20"); }
+        { Tmv2Window v = w; v.StochK[1] = 17.0; v.StochD[1] = 16.0; CHECK(Tmv2_F17BullCtx(&v) == 0, "tby no prior k<=d"); }
+    }
+    {
+        Tmv2Window w; BuildF18Bull(w);
+        CHECK(Tmv2_F18BullCtx(&w) == 0, "rby ctx fail closed");
+        FillRbyBullCtx(w);
+        // core F18Bull uses C>=H-0.25*(H-L); FillRby may have moved C. Re-apply after knowing H/L.
+        // If C was lowered below core, ctx must still include core. Rebuild then overlay C<=BbLo.
+        BuildF18Bull(w);
+        w.Adx[0] = 19.0; w.adxOk[0] = 1;
+        w.Rsi[0] = 29.0; w.rsiOk[0] = 1;
+        w.Smi[0] = -61.0; w.smiOk[0] = 1;
+        w.BbUp[0] = w.H[0] + 10.0;
+        w.BbLo[0] = w.C[0]; // C <= BbLo
+        w.bbOk[0] = 1;
+        CHECK(Tmv2_F18Bull(&w) == 1, "rby core still true");
+        CHECK(Tmv2_F18BullCtx(&w) == 1, "rby ctx true");
+        int fired[TMV2_N_OUT];
+        CHECK(Tmv2_EvalRole(2, &w, fired) == 2 && fired[28] == 1 && fired[36] == 1, "rby fires SG28+36");
+        { Tmv2Window v = w; v.Adx[0] = 20.0; CHECK(Tmv2_F18BullCtx(&v) == 0, "rby adx not <20"); }
+        { Tmv2Window v = w; v.C[0] = v.BbLo[0] + 0.25; CHECK(Tmv2_F18BullCtx(&v) == 0, "rby close above lower band"); }
+    }
 }
 
 int main()
@@ -972,6 +983,7 @@ int main()
     T25_Finite();
     T26_FnvBasis();
     T27_StructDisabled();
+    T28_HtmlContext();
     if (g_fails == 0)
         std::printf("TMV2 ALL GREEN: %d checks\n", g_checks);
     else
