@@ -3,7 +3,7 @@ SCDLLName("TriggerMatrixV2")
 
 // =============================================================================
 // TriggerMatrixV2.cpp
-// Sierra Chart ACSIL Custom Study — Trigger Matrix V2 Self-Contained v2.2
+// Sierra Chart ACSIL Custom Study — Trigger Matrix V2 Self-Contained v2.3
 //
 // Self-contained study: computes ALL role-relevant data internally from the
 // current chart native OHLC, bid/ask volume (SC_ASKVOL/SC_BIDVOL) and Volume
@@ -18,11 +18,11 @@ SCDLLName("TriggerMatrixV2")
 // Canonical catalog: v2-formula-catalog.json
 //   version 2.0.0-research-2026-09-09
 //   SHA-256 ea562e4789cc16bae2f3529882a9832d1ba8d1a0dd9d95fbb02088f8f5a08618
-// The 32 primary bull/bear formulas are ported mechanically from the
-// catalog. HTML v2 withContext arms for ordinals 16/17/18 publish as
-// LTR/TBY/RBY on SG32..37 (primaries stay byte-identical). Family-9
-// NYSE TICK overlay and blocked families (ordinals 3, 12, 13) are NOT
-// implemented. Legacy TriggerMatrix.cpp predicates are unused here.
+// Display names match TriggerMatrix V1 / HTML sourceName. Predicates are
+// HTML v2 formulas, not V1. withContext arms for ordinals 16/17/18 publish
+// as Long Trigger / T BUY / R BUY on SG32..37 (cores stay byte-identical).
+// Family-9 NYSE TICK overlay and blocked families (ordinals 3, 12, 13) are
+// NOT implemented. Legacy TriggerMatrix.cpp predicates are unused here.
 //
 // INTERNAL PRODUCERS (v2.0, fixed canonical math, no inputs):
 //   Bar delta  = native AskVol - BidVol per bar, valid only when classified
@@ -63,26 +63,27 @@ SCDLLName("TriggerMatrixV2")
 //     coverage assumption: Renko OHLC endpoints are synthetic, not traded
 //     ticks.
 //
-// SUBGRAPHS (even=Bull below low, odd=Bear above high):
-//   0/1 OED  Opposing Effort Decay (TEXT)              ord 1  Range
-//   2/3 DES  Directional Effort Slope Response (ARROW) ord 2  Range
-//   4/5 EEF  Extreme Effort Failure (TEXT)             ord 4  Range
-//   6/7 VGD  VAP Gradient Divergence (TEXT)            ord 5  Range
-//   8/9 WDM  Whole-Distribution Migration (TEXT)       ord 6  Range
-//   10/11 DRP Delta Reversal Profile Response (TEXT)   ord 7  Range
-//   12/13 PDR POC Delta Reclaim (TEXT)                 ord 8  Range
-//   14/15 FVR Frozen VPOC Reclaim (TEXT)               ord 9  Range
-//   16/17 ERM Effort Reversal with Value Migration     ord 10 Range
-//   18/19 PBM Fixed POC Balance Migration (SQUARE)     ord 11 Range
-//   20/21 OFR Order-Flow Reversal (TEXT)               ord 14 Renko 6t
-//   22/23 DVR Delta Reversal VPOC Reclaim (TEXT)       ord 15 Renko 6t
-//   24/25 VXC Frozen VPOC Cross (TEXT)                 ord 16 Renko 8t
-//   26/27 PEV Persistent Effort Volume Response        ord 17 Renko 8t
-//   28/29 R8F Renko-8 Effort Failure (TEXT)            ord 18 Renko 8t
-//   30/31 FPR Frozen POC Recovery (TEXT)               ord 19 Range
-//   32/33 LTR Long/Short Trigger (VXC + MACD/EMA/ADX/SMI) ord 20 Renko 8t
-//   34/35 TBY T BUY/T SELL (PEV + ADX/Stoch/SMI)          ord 21 Renko 8t
-//   36/37 RBY R BUY/R SELL (R8F + ADX/RSI/BB/SMI)         ord 22 Renko 8t
+// SUBGRAPHS (even=Bull below low, odd=Bear above high). Names = V1 / HTML
+// sourceName. Formulas = HTML v2 (not TriggerMatrix.cpp).
+//   0/1  Fading MOMO Below/Above (TEXT)                ord 1  Range
+//   2/3  Delta Rise / Delta Drop (ARROW)               ord 2  Range
+//   4/5  EXH+ / EXH- (TEXT)                            ord 4  Range
+//   6/7  VOL SEQ Bull/Bear (SQUARE)                    ord 5  Range
+//   8/9  VA Long / VA Short (TEXT)                     ord 6  Range
+//   10/11 Slingshot Buy/Sell (TEXT)                    ord 7  Range
+//   12/13 POC Delta Bull/Bear (TRIANGLE)               ord 8  Range
+//   14/15 MPOC+ / MPOC- (TEXT)                         ord 9  Range
+//   16/17 Delta Trap Bull/Bear (TEXT)                  ord 10 Range
+//   18/19 POCL Long / POCS Short (SQUARE)              ord 11 Range
+//   20/21 OF Long / OF Short (TRIANGLE)                ord 14 Renko 6t
+//   22/23 FA+ / FA- (TRIANGLE)                         ord 15 Renko 6t
+//   24/25 Long/Short Trigger Core (TEXT)               ord 16 Renko 8t
+//   26/27 T BUY/T SELL Core (TEXT)                     ord 17 Renko 8t
+//   28/29 R BUY/R SELL Core (TEXT)                     ord 18 Renko 8t
+//   30/31 POC Wave Bull/Bear (TEXT)                    ord 19 Range
+//   32/33 Long Trigger / Short Trigger (HTML withContext) ord 20 Renko 8t
+//   34/35 T BUY / T SELL (HTML withContext)            ord 21 Renko 8t
+//   36/37 R BUY / R SELL (HTML withContext)            ord 22 Renko 8t
 //   50..56 hidden indicator workspace (DRAWSTYLE_IGNORE)
 //
 // Producer index convention (catalog pin only; no external studies):
@@ -118,10 +119,10 @@ SCDLLName("TriggerMatrixV2")
 // Indexing convention: offset 0 = current completed bar, k = k bars prior.
 // ---------------------------------------------------------------------------
 
-#define TMV2_VERSION "2.2-self-contained"
+#define TMV2_VERSION "2.3-self-contained"
 #define TMV2_CATALOG_VERSION "2.0.0-research-2026-09-09"
 #define TMV2_CATALOG_SHA "ea562e4789cc16bae2f3529882a9832d1ba8d1a0dd9d95fbb02088f8f5a08618"
-#define TMV2_SCHEMA_VERSION 4
+#define TMV2_SCHEMA_VERSION 5
 
 #define TMV2_ROLE_RANGE 0
 #define TMV2_ROLE_RENKO6 1
@@ -1978,58 +1979,56 @@ SCSFExport scsf_TriggerMatrixV2(SCStudyInterfaceRef sc)
 
     if (sc.SetDefaults)
     {
-        sc.GraphName = "Trigger Matrix V2 Self-Contained v2.2";
+        sc.GraphName = "Trigger Matrix V2 Self-Contained v2.3";
         sc.StudyDescription =
-            "Self-contained V2 detectors: 16 primary families (SG0-31) plus HTML withContext LTR/TBY/RBY (SG32-37). "
-            "All data computed internally from native OHLC, bid/ask volume and VAP; "
-            "no external studies required. "
-            "Catalog 2.0.0-research-2026-09-09 "
-            "sha ea562e4789cc16bae2f3529882a9832d1ba8d1a0dd9d95fbb02088f8f5a08618. "
-            "One instance per chart role. No alerts, no trading.";
+            "V1 names, HTML v2 formulas (catalog 2.0.0-research-2026-09-09). "
+            "16 primary families SG0-31 plus Long Trigger / T BUY / R BUY withContext SG32-37. "
+            "Internal OHLC/AV/BV/VAP. No external studies. One instance per chart role. "
+            "No alerts, no trading.";
         sc.AutoLoop = 0;
         sc.GraphRegion = 0;
         sc.MaintainVolumeAtPriceData = 1;
 
         const char* bullName[16] = {
-            "OED+ | Bull | Opposing Effort Decay v2",
-            "DES+ | Bull | Directional Effort Slope Response v2",
-            "EEF+ | Bull | Extreme Effort Failure",
-            "VGD+ | Bull | VAP Gradient Divergence v2 Direct",
-            "WDM+ | Bull | Whole-Distribution Migration with Directional Edge Close",
-            "DRP+ | Bull | Delta Reversal Profile Response v2",
-            "PDR+ | Bull | POC Delta v2",
-            "FVR+ | Bull | Frozen VPOC Reclaim Core v2",
-            "ERM+ | Bull | Effort Reversal with Value Migration v2",
-            "PBM+ | Bull | Fixed POC Balance Migration v2",
-            "OFR+ | Bull | Order-Flow Reversal Concentration vNext",
-            "DVR+ | Bull | Delta Reversal VPOC Reclaim v2",
-            "VXC+ | Bull | Frozen VPOC Cross Executed Effort v2",
-            "PEV+ | Bull | Persistent Effort Volume Response v2",
-            "R8F+ | Bull | Extreme Effort Failure Core v2",
-            "FPR+ | Bull | Frozen POC Recovery + Distribution Confirmation v2"};
+            "Fading MOMO Below",
+            "Delta Rise",
+            "EXH+",
+            "VOL SEQ Bull",
+            "VA Long",
+            "Slingshot Buy",
+            "POC Delta Bull",
+            "MPOC+",
+            "Delta Trap Bull",
+            "POCL Long",
+            "OF Long",
+            "FA+",
+            "Long Trigger Core",
+            "T BUY Core",
+            "R BUY Core",
+            "POC Wave Bull"};
         const char* bearName[16] = {
-            "OED- | Bear | Opposing Effort Decay v2",
-            "DES- | Bear | Directional Effort Slope Response v2",
-            "EEF- | Bear | Extreme Effort Failure",
-            "VGD- | Bear | VAP Gradient Divergence v2 Direct",
-            "WDM- | Bear | Whole-Distribution Migration with Directional Edge Close",
-            "DRP- | Bear | Delta Reversal Profile Response v2",
-            "PDR- | Bear | POC Delta v2",
-            "FVR- | Bear | Frozen VPOC Reclaim Core v2",
-            "ERM- | Bear | Effort Reversal with Value Migration v2",
-            "PBM- | Bear | Fixed POC Balance Migration v2",
-            "OFR- | Bear | Order-Flow Reversal Concentration vNext",
-            "DVR- | Bear | Delta Reversal VPOC Reclaim v2",
-            "VXC- | Bear | Frozen VPOC Cross Executed Effort v2",
-            "PEV- | Bear | Persistent Effort Volume Response v2",
-            "R8F- | Bear | Extreme Effort Failure Core v2",
-            "FPR- | Bear | Frozen POC Recovery + Distribution Confirmation v2"};
+            "Fading MOMO Above",
+            "Delta Drop",
+            "EXH-",
+            "VOL SEQ Bear",
+            "VA Short",
+            "Slingshot Sell",
+            "POC Delta Bear",
+            "MPOC-",
+            "Delta Trap Bear",
+            "POCS Short",
+            "OF Short",
+            "FA-",
+            "Short Trigger Core",
+            "T SELL Core",
+            "R SELL Core",
+            "POC Wave Bear"};
         const char* bullText[16] = {
-            "OED+", "DES+", "EEF+", "VGD+", "WDM+", "DRP+", "PDR+", "FVR+",
-            "ERM+", "PBM+", "OFR+", "DVR+", "VXC+", "PEV+", "R8F+", "FPR+"};
+            "MOMO-", "RISE", "EXH+", "VOL+", "VA+", "BUY", "POCD+", "MPOC+",
+            "TRAP+", "POCL", "OFL", "FA+", "LTRC", "TBUYC", "RBUYC", "WAVE+"};
         const char* bearText[16] = {
-            "OED-", "DES-", "EEF-", "VGD-", "WDM-", "DRP-", "PDR-", "FVR-",
-            "ERM-", "PBM-", "OFR-", "DVR-", "VXC-", "PEV-", "R8F-", "FPR-"};
+            "MOMO+", "DROP", "EXH-", "VOL-", "VA-", "SELL", "POCD-", "MPOC-",
+            "TRAP-", "POCS", "OFS", "FA-", "STRC", "TSELLC", "RSELLC", "WAVE-"};
 
         for (int f = 0; f < 16; f++)
         {
@@ -2037,15 +2036,35 @@ SCSFExport scsf_TriggerMatrixV2(SCStudyInterfaceRef sc)
             const int sgR = f * 2 + 1;
             sc.Subgraph[sgB].Name = bullName[f];
             sc.Subgraph[sgR].Name = bearName[f];
-            if (f == 1) // DES: arrows
+            sc.Subgraph[sgB].DrawZeros = 0;
+            sc.Subgraph[sgR].DrawZeros = 0;
+            sc.Subgraph[sgB].PrimaryColor = RGB(0, 200, 255);
+            sc.Subgraph[sgR].PrimaryColor = RGB(255, 159, 28);
+            if (f == 1) // Delta Rise / Drop
             {
                 sc.Subgraph[sgB].DrawStyle = DRAWSTYLE_ARROW_UP;
                 sc.Subgraph[sgR].DrawStyle = DRAWSTYLE_ARROW_DOWN;
+                sc.Subgraph[sgB].LineWidth = 4;
+                sc.Subgraph[sgR].LineWidth = 4;
             }
-            else if (f == 9) // PBM: squares
+            else if (f == 3 || f == 9) // VOL SEQ, POCL
             {
                 sc.Subgraph[sgB].DrawStyle = DRAWSTYLE_SQUARE;
                 sc.Subgraph[sgR].DrawStyle = DRAWSTYLE_SQUARE;
+                sc.Subgraph[sgB].LineWidth = 4;
+                sc.Subgraph[sgR].LineWidth = 4;
+            }
+            else if (f == 6 || f == 10 || f == 11) // POC Delta, OF, FA
+            {
+                sc.Subgraph[sgB].DrawStyle = DRAWSTYLE_TRIANGLEUP;
+                sc.Subgraph[sgR].DrawStyle = DRAWSTYLE_TRIANGLEDOWN;
+                sc.Subgraph[sgB].LineWidth = 8;
+                sc.Subgraph[sgR].LineWidth = 8;
+                if (f == 11)
+                {
+                    sc.Subgraph[sgB].PrimaryColor = RGB(0, 220, 0);
+                    sc.Subgraph[sgR].PrimaryColor = RGB(220, 0, 0);
+                }
             }
             else
             {
@@ -2056,40 +2075,35 @@ SCSFExport scsf_TriggerMatrixV2(SCStudyInterfaceRef sc)
                 sc.Subgraph[sgB].LineWidth = 8;
                 sc.Subgraph[sgR].LineWidth = 8;
             }
-            if (f == 1 || f == 9)
-            {
-                sc.Subgraph[sgB].LineWidth = 4;
-                sc.Subgraph[sgR].LineWidth = 4;
-            }
-            sc.Subgraph[sgB].PrimaryColor = RGB(0, 200, 255);
-            sc.Subgraph[sgR].PrimaryColor = RGB(255, 159, 28);
-            sc.Subgraph[sgB].DrawZeros = 0;
-            sc.Subgraph[sgR].DrawZeros = 0;
         }
 
-        // HTML v2 withContext (V1-named): Long Trigger, T BUY, R BUY.
-        const char* ctxBullName[3] = {
-            "LTR+ | Long Trigger | VXC + MACD/EMA/ADX/SMI",
-            "TBY+ | T BUY | PEV + ADX/Stoch/SMI",
-            "RBY+ | R BUY | R8F + ADX/RSI/BB/SMI"};
-        const char* ctxBearName[3] = {
-            "LTR- | Short Trigger | VXC + MACD/EMA/ADX/SMI",
-            "TBY- | T SELL | PEV + ADX/Stoch/SMI",
-            "RBY- | R SELL | R8F + ADX/RSI/BB/SMI"};
-        const char* ctxBullText[3] = {"LTR+", "T BUY", "R BUY"};
-        const char* ctxBearText[3] = {"LTR-", "T SELL", "R SELL"};
+        // V1 names + HTML withContext formulas (core + indicators).
+        const char* ctxBullName[3] = {"Long Trigger", "T BUY", "R BUY"};
+        const char* ctxBearName[3] = {"Short Trigger", "T SELL", "R SELL"};
+        const char* ctxBullText[3] = {"Long Trigger", "T BUY", "R BUY"};
+        const char* ctxBearText[3] = {"Short Trigger", "T SELL", "R SELL"};
         for (int c = 0; c < 3; c++)
         {
             const int sgB = 32 + c * 2;
             const int sgR = sgB + 1;
             sc.Subgraph[sgB].Name = ctxBullName[c];
             sc.Subgraph[sgR].Name = ctxBearName[c];
-            sc.Subgraph[sgB].DrawStyle = DRAWSTYLE_TEXT;
-            sc.Subgraph[sgR].DrawStyle = DRAWSTYLE_TEXT;
-            sc.Subgraph[sgB].TextDrawStyleText = ctxBullText[c];
-            sc.Subgraph[sgR].TextDrawStyleText = ctxBearText[c];
-            sc.Subgraph[sgB].LineWidth = 8;
-            sc.Subgraph[sgR].LineWidth = 8;
+            if (c == 0)
+            {
+                sc.Subgraph[sgB].DrawStyle = DRAWSTYLE_SQUARE;
+                sc.Subgraph[sgR].DrawStyle = DRAWSTYLE_SQUARE;
+                sc.Subgraph[sgB].LineWidth = 4;
+                sc.Subgraph[sgR].LineWidth = 4;
+            }
+            else
+            {
+                sc.Subgraph[sgB].DrawStyle = DRAWSTYLE_TEXT;
+                sc.Subgraph[sgR].DrawStyle = DRAWSTYLE_TEXT;
+                sc.Subgraph[sgB].TextDrawStyleText = ctxBullText[c];
+                sc.Subgraph[sgR].TextDrawStyleText = ctxBearText[c];
+                sc.Subgraph[sgB].LineWidth = 8;
+                sc.Subgraph[sgR].LineWidth = 8;
+            }
             sc.Subgraph[sgB].PrimaryColor = RGB(0, 100, 255);
             sc.Subgraph[sgR].PrimaryColor = RGB(255, 0, 100);
             sc.Subgraph[sgB].DrawZeros = 0;
