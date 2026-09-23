@@ -189,3 +189,138 @@ The order-flow engines have **"OTF Filter" inputs** (Arrow OTF Slot 1/2 and Conf
 ---
 
 *This note is a snapshot of file state as of 2026-05-20. Treat the code as authoritative — if anything here disagrees with the source, the source wins.*
+
+---
+
+## 2026-09-03 — Failed Aggression Map v1.0 (new standalone study)
+
+- Added `FailedAggressionMap.cpp` (`Failed Aggression Map v1.0`, `AutoLoop = 0`,
+  region 0, `MaintainVolumeAtPriceData = 1`). Existing studies untouched
+  (`TrappedTraders.cpp` / `LiquidityZones.cpp` used for VAP/drawing precedent only).
+- Closed-bar-only engine in integer ticks: rolling-window delta aggregation
+  (int64), delta-weighted centroid, confirm-by-adverse-displacement with deadline
+  discard, first-retest-from-displaced-side, exit-based failed retest,
+  far-edge acceptance-through. Sequential engine so full recalc reproduces live.
+- Threshold modes Manual (95/350) / Auto (median of daily p85/p80 over 5 prior
+  complete Sierra trading days, cached per day, warmup warning) / Both (Manual
+  precedence on inclusive-tick intersection; same-side/source merge adds totals).
+- 4 rendering modes (Bubble+Ribbon default, Glyphs, Legacy Rectangle, combined);
+  ordinary (non-user-drawn) UseTool namespace deleted via
+  `DeleteACSChartDrawing(TOOL_DELETE_CHARTDRAWING)`; 14 SGs; 23 inputs; live-only
+  watermarked alerts; fixed-capacity (128) persistent state freed on
+  `LastCallToFunction`.
+- Spec: `FailedAggressionMap_BuildSpec.md`. Static gate 12/12 on Linux.
+  NOT yet compiled in Sierra Chart — needs F5 compile + replay validation.
+
+## 2026-09-03 — Failed Aggression Map v1.0 review fixes (standalone study)
+
+- Independent review (`FailedAggressionMap_Review.md`, no BLOCKERs, 12/12 gate)
+  followed by fix pass; `TrappedTraders.cpp` / `LiquidityZones.cpp` untouched.
+- Fixed: history rewrite now forces full rebuild (H-2); merge path publishes
+  the full pulse triple and recomputes strength from the merged total (M-1/M-2);
+  fingerprint folds full 64-bit threshold magnitudes (M-3); fail text anchored
+  at fail-bar close to match SG13 (M-4); Auto sampler uses full-length windows
+  only (M-5); centroid uses exact integer rounding incl. negative-safe
+  tick conversion (L-1/L-2).
+- Spec aligned: SG12 POINT / SG13 DIAMOND table (M-6), 23-input heading (L-4),
+  alert semantics documented. Exact Zander `SC_DLL_VERSION 2927` header audit then
+  fixed two compile blockers: `DRAWING_ELLIPSEHIGHLIGHT` replaces the nonexistent
+  `DRAWING_ELLIPSE`, and `SetChartStudySubgraphValues` uses its required 3-argument
+  Chart/Study/Subgraph form.
+- Gate 12/12 on Linux (1266 lines). Still NOT Sierra-compiled — F5 + replay
+  checklist in the review Sec. 4 remains.
+
+## 2026-09-03 — EffortVsResult v1.0 (new standalone study)
+
+New files: `EffortVsResult.cpp`, `EffortVsResult_BuildSpec.md`. No existing
+study modified.
+
+- **What it is:** lightweight closed-bar filter measuring whether aggressive
+  order flow was rewarded by price. `BarDelta` from the chart's own VAP
+  (`MaintainVolumeAtPriceData = 1`, no Numbers Bars dependency), normalized by
+  EWMA `|BarDelta|` without mean subtraction; result (`Close-Open` /
+  `Close-PrevClose` / excursion-close-location composite) normalized by EWMA
+  True Range. `SignedFailure = -sign(Effort) * |Effort| * max(0, Stall -
+  SignedReward)`, gated by Minimum Effort 1.25, EMA-smoothed (3). Negative /
+  magenta = buyers failed; positive / cyan = sellers failed.
+- **Confirmation:** one-bar-delayed channel prints pulses + price-region
+  arrows on bar `i+1` only (no extension beyond candidate extreme + adverse
+  close vs candidate midpoint), no future leak, no rectangles.
+- **Engineering:** 13 SGs, 20 inputs, persistent slots 1 (bars guard), 2/3
+  (alert watermarks), 4-6 (settings fingerprint), ptr 10 (EWMA carry struct,
+  no STL). Post-loop alert watermark scan anchored to the current bar;
+  full recalc fast-forwards with no historical alerts. Static gate 12/12;
+  Sierra compile + replay validation still open (no build system on Linux).
+
+## 2026-09-03 — EffortVsResult review fixes (same branch, no existing study touched)
+
+Addressed the independent review (`EffortVsResult_Review.md`: 1 HIGH, 5
+MEDIUM, 5 LOW). No BLOCKERs; all findings valid except LOW-3/4 (no-action,
+documented) and MEDIUM-3 core (pattern already correct).
+
+- **HIGH-1:** confirmation pulses now hold the CANDIDATE bar's failure
+  (`SG_SFailS[j-1]`, fallback `SG_SFail[j-1]`, then current smoothed),
+  published only with the correct sign (buyer `< 0`, seller `> 0`); arrows
+  still print on every price confirmation. Alert scan sign-gated with 1e-6
+  epsilon (`< -1e-6` buyer, `> +1e-6` seller).
+- **MEDIUM-1:** pulse/arrow/rewarded `DataColor` cleared alongside zero values
+  in-loop, forming-bar, and VAP-null paths.
+- **MEDIUM-2:** mid-history data correction (`UpdateStartIndex <=
+  lastProcessed`) forces a full rebuild; history can no longer diverge after
+  corrections.
+- **MEDIUM-3:** dropped the `== 0` watermark sentinel (first call always takes
+  the full-recalc path); documented that disabled-alert windows still advance
+  watermarks (no catch-up storm on re-enable).
+- **MEDIUM-4:** `MaxNorm` clamped up to `Minimum Effort` so `0 < MaxNorm <
+  MinEffort` can no longer silently flatline the study.
+- **MEDIUM-5:** VAP-null branch shares the fingerprint + intrabar guard —
+  intrabar ticks return without rewriting all bars; fingerprint/`lastKnownBars`
+  update on re-zero.
+- **LOW-1:** `maxNorm` fingerprint packing raised x100 → x1000 (0.001 quantum,
+  spec-noted). **LOW-2:** covered by sign-gated alert scan. **LOW-3:** float
+  narrowing documented in code. Spec (`EffortVsResult_BuildSpec.md` §§2-3,6-7)
+  updated to match. Gate re-run 12/12.
+- Exact Zander `SC_DLL_VERSION 2927` header audit found no ACSIL API mismatches;
+  details are in `EffortVsResult_HeaderAudit.md`. Sierra F5 compile and replay
+  remain required before live use.
+
+## 2026-09-04 — EffortVsResultEvaluator v1.0 (new companion study, TDD)
+
+New files: `EffortVsResultEvaluator.cpp`,
+`tests/test_effort_vs_result_evaluator.cpp`,
+`tests/run_effort_vs_result_evaluator_tests.sh`,
+`EffortVsResultEvaluator_TDD.md`. `EffortVsResult.cpp` untouched.
+
+- **What it is:** same-chart event-study evaluator for `EffortVsResult.cpp`
+  (function `scsf_EffortVsResultEvaluator`, `AutoLoop = 0`, region 1, 18
+  `DRAWSTYLE_IGNORE` SGs, 15 inputs). Reads canonical source SGs
+  2/5/6/7/8/9/10 via `GetStudyArrayFromChartUsingID` once per call; never
+  recomputes effort/reward/failure. Buyer failure = short, seller = long;
+  candidate bar is `j-1`; same-bar dual-side = conflict (`-5`); forming bar
+  never a signal/outcome source.
+- **Mechanics:** Next-Open / Confirmation-Close entry with traversal always
+  from `j+1`; candidate-extreme stops + `TargetR` targets; elapsed-time
+  horizon (default 15 min) with right-edge censoring as `-4` (never a
+  timeout); Mark/Exclude vs Stop-First vs Target-First ambiguity; MFE/MAE in
+  R units; Include+Flag vs Exclude overlap with chronological prior-exit
+  state; session filter with midnight crossing; YYYYMMDD bounds with
+  leap-aware validation; cumulative included/avg-R/win-rate SGs; one-shot
+  full-recalc/settings-rebuild-only CSV export under `DataFilesFolder()`
+  via temp-file + backup/restore replacement with
+  `[A-Za-z0-9_.-]` sanitization and `GetBarPeriodParameters` columns.
+  Full-recalc/settings-rebuild-only evaluation — ordinary updates do not
+  rescan. Persistent slots 4-6 only (structural fingerprint, CSV
+  enable/prefix excluded); no heap, no STL, no static mutable state, no
+  float equality on prices, one config message per invalid setup (not per
+  bar).
+- **Verification:** vertical TDD per spec §13 — RED was a missing-file
+  compile failure, then a horizon-censoring probe (`status=-4`) proving the
+  fixture needed a horizon-covering tape; full suite covers all 12 spec
+  areas. Final portable result: `checks=103 fails=0, ALL EVR EVALUATOR TESTS
+  PASSED`, warning-free under `-Wall -Wextra`. Self-checks: one
+  `SCSFExport`, max SG index 17, all 15 inputs defaulted and read; ACSIL
+  surface limited to repo-precedent APIs verified against the Zander SC_DLL_VERSION 2927 cached headers.
+- **Completed:** official static gate 12/12, Zander header/API audit PASS,
+  independent review PASS with no blockers. Only Sierra F5 compilation and
+  on-chart runtime validation remain outstanding; historical ranking itself
+  does not require replay.
