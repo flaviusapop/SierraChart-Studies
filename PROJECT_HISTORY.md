@@ -33,6 +33,47 @@ The two most recently touched threads — and the ones earmarked to continue in 
 
 ---
 
+## 2026-06-18 — CoilingState.cpp (new study)
+
+**`CoilingState.cpp`** — Pre-ignition coiling detector
+
+**Purpose:** Detects when multiple orderflow triggers are simultaneously near their firing threshold ("coiling state"), signalling a pre-ignition setup before any single trigger fires.
+
+**Architecture:**
+- Fully self-contained — no `GetStudyArrayFromChartUsingID`. Delta computed from `sc.AskVolume - sc.BidVolume` natively. All indicators computed internally.
+- Chart-type agnostic: loads unchanged on Range Bar, Renko 6t, or Renko 8t.
+- Covers 38 of 40 active triggers (triggers #17 and #18 excluded — require external NYSE Tick data not available from chart).
+
+**Inputs (9 total):**
+
+| Index | Name | Default | Structural? |
+|-------|------|---------|-------------|
+| 0 | BB Length | 20 | ✓ |
+| 1 | BB Multiplier | 0.9 | ✓ |
+| 2 | Coil Threshold (0–1) | 0.80 | ✓ |
+| 3 | Min BB Width Guard | 5.0 | ✓ |
+| 4 | Min Triggers to Alert | 3 | ✓ |
+| 5 | Accumulation Bars | 1 | ✓ |
+| 6 | Alert Sound ID | 2 | ✓ |
+| 7 | Long Alert Color | Green | ✗ |
+| 8 | Short Alert Color | Red | ✗ |
+
+**Subgraph layout (63 total — under 64 limit):**
+- SG 0–20: Internal computation (delta, BB, VPOC, VAH, VAL, EMA50/200, MACD, ADX, RSI, Stoch, CumDelta, ADX intermediates) — all DRAWSTYLE_IGNORE
+- SG 21–58: Per-trigger proximity values (38 × IGNORE) — readable by downstream studies
+- SG 59–60: CoilScoreLong / CoilScoreShort (indicator panel, trigger count)
+- SG 61–62: CoilAlertLong / CoilAlertShort (main price chart, DRAWSTYLE_POINT)
+
+**Proximity formula:** Each trigger maps to 0–1 float. Boolean conditions contribute 0 or 1; key ratio conditions (delta/bbUpper) contribute continuously. Proximity = normalized sum of sub-condition scores.
+
+**Alert logic:** `CoilAlertLong` fires when ≥ `MinTriggers` long-direction triggers have proximity ≥ `CoilThreshold` within the last `AccumulationBars` bars (any bar in window). Rising-edge only (watermark pattern, CLAUDE.md standard). Short alert mirrors this.
+
+**Persistent slots:** 1=lastKnownBars, 2=alertedBarLong, 3=alertedBarShort, 4–6=settings fingerprint.
+
+**TODO:** Trigger proximity weights need re-rating with the count-based composite formula in mind (separate task).
+
+---
+
 ## How the pieces fit together
 
 ```

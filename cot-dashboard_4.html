@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>COT Analysis Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=IBM+Plex+Sans:wght@400;600;700&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #21262d;
+    --border2: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --subtle: #c9d1d9;
+    --green: #3fb950;
+    --red: #f85149;
+    --blue: #79c0ff;
+    --yellow: #f0e68c;
+    --orange: #ffa657;
+    --accent: #388bfd;
+    --mono: 'IBM Plex Mono', monospace;
+    --sans: 'IBM Plex Sans', sans-serif;
+  }
+
+  body { background: var(--bg); color: var(--text); font-family: var(--sans); min-height: 100vh; padding: 20px 24px; }
+
+  .header { margin-bottom: 20px; }
+  .header-top { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
+  .eyebrow { font-size: 10px; letter-spacing: 0.15em; color: var(--muted); text-transform: uppercase; margin-bottom: 3px; }
+  h1 { font-size: 22px; font-weight: 700; color: var(--text); }
+  .header-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .control-label { font-size: 10px; letter-spacing: 0.08em; color: var(--muted); text-transform: uppercase; }
+
+  select { background: var(--panel); border: 1px solid var(--border2); border-radius: 6px; color: var(--text); padding: 7px 12px; font-size: 13px; cursor: pointer; font-family: var(--sans); outline: none; transition: border-color 0.2s; }
+  select:hover { border-color: var(--accent); }
+  .btn { background: var(--panel); border: 1px solid var(--border2); border-radius: 6px; color: var(--text); padding: 7px 14px; font-size: 12px; cursor: pointer; font-family: var(--sans); letter-spacing: 0.05em; transition: all 0.2s; }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  .header-meta { font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); padding-top: 10px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .status { font-size: 12px; font-family: var(--mono); }
+  .status.loading { color: var(--accent); animation: pulse 1.2s infinite; }
+  .status.error { color: var(--red); }
+  .status.ok { color: var(--green); }
+
+  .stats-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  .gauge-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 18px; display: flex; align-items: center; gap: 18px; }
+  .gauge-bias { font-size: 20px; font-weight: 700; }
+  .gauge-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .stat-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; flex: 1; min-width: 130px; }
+  .stat-label { font-size: 9px; letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; margin-bottom: 4px; }
+  .stat-value { font-size: 20px; font-weight: 700; font-family: var(--mono); }
+  .stat-sub { font-size: 10px; color: var(--muted); margin-top: 3px; }
+
+  .analysis-block { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 18px; margin-bottom: 10px; }
+  .analysis-block.cot { border-left: 3px solid var(--yellow); }
+  .analysis-block.take { border-left: 3px solid var(--green); }
+  .block-eyebrow { font-size: 10px; letter-spacing: 0.12em; color: var(--muted); text-transform: uppercase; margin-bottom: 8px; }
+  .block-text { font-size: 13px; line-height: 1.75; color: var(--subtle); }
+
+  .chart-panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px 12px 12px; margin-bottom: 12px; }
+  .chart-title { font-size: 13px; font-weight: 600; text-align: center; letter-spacing: 0.05em; margin-bottom: 14px; }
+  .chart-wrap { position: relative; height: 340px; }
+  .chart-placeholder { display: flex; align-items: center; justify-content: center; height: 340px; color: var(--muted); font-size: 14px; text-align: center; padding: 20px; }
+
+  .legend { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 8px; }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
+  .legend-swatch { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+
+  .debug-panel { background: #0a0e13; border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-top: 12px; display: none; }
+  .debug-panel.visible { display: block; }
+  .debug-panel pre { font-size: 11px; font-family: var(--mono); color: var(--muted); white-space: pre-wrap; word-break: break-all; max-height: 240px; overflow-y: auto; }
+
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-top">
+    <div>
+      <div class="eyebrow">CFTC Commitments of Traders</div>
+      <h1>COT Analysis Dashboard</h1>
+    </div>
+    <div class="header-controls">
+      <span class="control-label">Instrument</span>
+      <select id="instrSelect"></select>
+      <button class="btn" onclick="loadData()">↻ Refresh</button>
+      <button class="btn" onclick="toggleDebug()">Debug</button>
+    </div>
+  </div>
+  <div class="header-meta">
+    <span>Source: CFTC Legacy &amp; Disaggregated Reports — Futures Only · Socrata API</span>
+    <span id="statusEl" class="status">—</span>
+  </div>
+</div>
+
+<div id="statsRow" class="stats-row" style="display:none"></div>
+
+<div id="cotBlock" class="analysis-block cot" style="display:none">
+  <div class="block-eyebrow">COT Analysis — Rate of Change &amp; Positioning</div>
+  <div id="cotText" class="block-text"></div>
+</div>
+
+<div id="takeBlock" class="analysis-block take" style="display:none">
+  <div class="block-eyebrow">Trader's Take — Plain English</div>
+  <div id="takeText" class="block-text"></div>
+</div>
+
+<div class="chart-panel">
+  <div class="chart-title" id="chartTitle">—</div>
+  <div class="chart-wrap">
+    <div id="chartPlaceholder" class="chart-placeholder">Select an instrument to load data</div>
+    <canvas id="mainChart" style="display:none"></canvas>
+  </div>
+</div>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-swatch" style="background:#f0e68c"></div>Large Speculators (Non-Commercial / Managed Money)</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#79c0ff"></div>Commercials (Hedgers)</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#ffa657"></div>Small Speculators (Non-Reportable)</div>
+</div>
+
+<!-- Bias Score History Chart -->
+<div class="chart-panel" id="biasChartPanel" style="display:none; margin-top:12px;">
+  <div class="chart-title">Historical COT Bias Score — Weekly (0–100)</div>
+  <div style="display:flex; gap:16px; justify-content:center; margin-bottom:10px; flex-wrap:wrap;">
+    <div class="legend-item"><div class="legend-swatch" style="background:#3fb950"></div>Bullish (≥65)</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:#7ee787"></div>Leaning Bullish (55–64)</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:#8b949e"></div>Neutral (46–54)</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:#ffa198"></div>Leaning Bearish (36–45)</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:#f85149"></div>Bearish (≤35)</div>
+  </div>
+  <div class="chart-wrap" style="height:200px;">
+    <canvas id="biasChart"></canvas>
+  </div>
+</div>
+
+<div id="debugPanel" class="debug-panel">
+  <div class="block-eyebrow" style="margin-bottom:6px">Debug Log</div>
+  <pre id="debugLog"></pre>
+</div>
+
+<script>
+// ─────────────────────────────────────────────────────────────────────────────
+// The CFTC uses the Socrata API. Each COT report is a single dataset (all years).
+// Dataset IDs (found at publicreporting.cftc.gov/stories/s/r4w3-av2u):
+//   Legacy Futures Only:         6dca-aqww
+//   Disaggregated Futures Only:  72hh-3qpy
+// Endpoint pattern: https://publicreporting.cftc.gov/resource/{id}.json
+// ─────────────────────────────────────────────────────────────────────────────
+
+const INSTRUMENTS = [
+  { label: "S&P 500 E-Mini (ES)",       code: "13874A", dataset: "6dca-aqww", type: "legacy" },
+  { label: "Nasdaq 100 E-Mini (NQ)",    code: "209742", dataset: "6dca-aqww", type: "legacy" },
+  { label: "Russell 2000 E-Mini (RTY)", code: "239742", dataset: "6dca-aqww", type: "legacy" },
+  { label: "10-Year T-Note (ZN)",       code: "043602", dataset: "6dca-aqww", type: "legacy" },
+  { label: "Euro FX (6E)",              code: "099741", dataset: "6dca-aqww", type: "legacy" },
+  { label: "Japanese Yen (6J)",         code: "097741", dataset: "6dca-aqww", type: "legacy" },
+  { label: "Crude Oil WTI (CL)",        code: "067651", dataset: "72hh-3qpy", type: "disagg" },
+  { label: "Gold (GC)",                 code: "088691", dataset: "72hh-3qpy", type: "disagg" },
+];
+
+// Field names differ between Legacy and Disaggregated reports
+const FIELDS = {
+  legacy: {
+    date: "report_date_as_yyyy_mm_dd",
+    lsLong: "noncomm_positions_long_all", lsShort: "noncomm_positions_short_all",
+    commLong: "comm_positions_long_all",  commShort: "comm_positions_short_all",
+    ssLong: "nonrept_positions_long_all", ssShort: "nonrept_positions_short_all",
+    oi: "open_interest_all", codeField: "cftc_contract_market_code",
+  },
+  disagg: {
+    date: "report_date_as_yyyy_mm_dd",
+    lsLong: "m_money_positions_long_all", lsShort: "m_money_positions_short_all",
+    commLong: "prod_merc_positions_long_all", commShort: "prod_merc_positions_short_all",
+    ssLong: "nonrept_positions_long_all", ssShort: "nonrept_positions_short_all",
+    oi: "open_interest_all", codeField: "cftc_contract_market_code",
+  }
+};
+
+// Populate dropdown
+const sel = document.getElementById('instrSelect');
+INSTRUMENTS.forEach((ins, i) => {
+  const o = document.createElement('option');
+  o.value = i; o.textContent = ins.label; sel.appendChild(o);
+});
+sel.addEventListener('change', loadData);
+
+// ── STATE ──────────────────────────────────────────────────────────────────
+let chartInstance = null, biasChartInstance = null, debugVisible = false, debugLines = [];
+
+// Compute bias score for every week (rolling window, needs at least 3 prior points)
+function computeHistoricalScores(data) {
+  const allNets = data.map(d => d.lsNet);
+  const minNet  = Math.min(...allNets);
+  const maxNet  = Math.max(...allNets);
+  const range   = (maxNet - minNet) || 1;
+
+  return data.map((d, i) => {
+    if (i < 3) return { date: d.date, score: null };
+    const lsNet        = d.lsNet;
+    const weekChange   = d.lsNet - data[i-1].lsNet;
+    const prevWkChange = data[i-1].lsNet - data[i-2].lsNet;
+    const cum13start   = data[Math.max(0, i-13)].lsNet;
+    const cumulative13 = lsNet - cum13start;
+    const accel = Math.abs(weekChange) > Math.abs(prevWkChange) && Math.sign(weekChange) === Math.sign(prevWkChange);
+    const accelBull = accel && weekChange > 0;
+    const accelBear = accel && weekChange < 0;
+    const pct = Math.round(((lsNet - minNet) / range) * 100);
+    let score = 50;
+    score += (pct - 50) * 0.3;
+    score += weekChange > 0 ? 10 : -10;
+    score += cumulative13 > 0 ? 5 : -5;
+    if (accelBull) score += 8;
+    if (accelBear) score -= 8;
+    return { date: d.date, score: Math.max(0, Math.min(100, Math.round(score))) };
+  }).filter(d => d.score !== null);
+}
+
+function log(msg) {
+  debugLines.push(`[${new Date().toISOString().slice(11,19)}] ${msg}`);
+  document.getElementById('debugLog').textContent = debugLines.slice(-80).join('\n');
+}
+function toggleDebug() {
+  debugVisible = !debugVisible;
+  document.getElementById('debugPanel').classList.toggle('visible', debugVisible);
+}
+function setStatus(msg, type) {
+  const el = document.getElementById('statusEl');
+  el.textContent = msg; el.className = `status ${type||''}`;
+}
+
+// ── FETCH ──────────────────────────────────────────────────────────────────
+async function fetchCOT(instr) {
+  const f = FIELDS[instr.type];
+  // 3-year lookback
+  const cutoff = new Date();
+  cutoff.setFullYear(cutoff.getFullYear() - 3);
+  const cutoffStr = cutoff.toISOString().slice(0,10) + "T00:00:00.000";
+
+  // Socrata SoQL via query params
+  const params = new URLSearchParams({
+    "$where":  `${f.codeField}='${instr.code}' AND ${f.date}>='${cutoffStr}'`,
+    "$select": [f.date,f.lsLong,f.lsShort,f.commLong,f.commShort,f.ssLong,f.ssShort,f.oi].join(","),
+    "$order":  `${f.date} DESC`,
+    "$limit":  "200",
+  });
+
+  const url = `https://publicreporting.cftc.gov/resource/${instr.dataset}.json?${params}`;
+  log(`Fetching ${instr.label} | dataset=${instr.dataset} | code=${instr.code}`);
+  log(`URL: ${url}`);
+
+  const res = await fetch(url);
+  const text = await res.text();
+  log(`HTTP ${res.status} — ${text.length} chars received`);
+
+  if (!res.ok) { log(`Error: ${text.slice(0,300)}`); throw new Error(`HTTP ${res.status}`); }
+
+  const json = JSON.parse(text);
+  log(`Records: ${json.length}`);
+  if (json.length > 0) {
+    log(`Field keys: ${Object.keys(json[0]).join(', ')}`);
+    log(`First record: ${JSON.stringify(json[0]).slice(0,300)}`);
+  }
+  return json;
+}
+
+function processRecords(raw, type) {
+  const f = FIELDS[type];
+  return raw.map(r => ({
+    date:    r[f.date]?.slice(0,10),
+    lsNet:   (parseFloat(r[f.lsLong])||0) - (parseFloat(r[f.lsShort])||0),
+    commNet: (parseFloat(r[f.commLong])||0) - (parseFloat(r[f.commShort])||0),
+    ssNet:   (parseFloat(r[f.ssLong])||0) - (parseFloat(r[f.ssShort])||0),
+    oi:      parseFloat(r[f.oi])||0,
+  }))
+  .filter(d => d.date)
+  .sort((a,b) => new Date(a.date) - new Date(b.date));
+}
+
+// ── ANALYTICS ──────────────────────────────────────────────────────────────
+function computeAnalytics(data) {
+  if (!data || data.length < 3) return null;
+  const n = data.length;
+  const latest = data[n-1], prev = data[n-2], prev2 = data[n-3];
+  const weekChange     = latest.lsNet - prev.lsNet;
+  const prevWeekChange = prev.lsNet - prev2.lsNet;
+  const cumulative13   = latest.lsNet - (data.slice(-14)[0]?.lsNet ?? latest.lsNet);
+  const accelerating   = Math.abs(weekChange) > Math.abs(prevWeekChange) && Math.sign(weekChange) === Math.sign(prevWeekChange);
+  const accelBull = accelerating && weekChange > 0;
+  const accelBear = accelerating && weekChange < 0;
+
+  const nets  = data.map(d => d.lsNet);
+  const range = (Math.max(...nets) - Math.min(...nets)) || 1;
+  const pct   = Math.round(((latest.lsNet - Math.min(...nets)) / range) * 100);
+
+  let score = 50;
+  score += (pct - 50) * 0.3;
+  score += weekChange > 0 ? 10 : -10;
+  score += cumulative13 > 0 ? 5 : -5;
+  if (accelBull) score += 8;
+  if (accelBear) score -= 8;
+  score = Math.max(0, Math.min(100, Math.round(score)));
+
+  const bias = score>=65?"Bullish":score>=55?"Leaning Bullish":score<=35?"Bearish":score<=45?"Leaning Bearish":"Neutral";
+  return { latest, weekChange, cumulative13, accelBull, accelBear, pct, score, bias };
+}
+
+// ── HELPERS ────────────────────────────────────────────────────────────────
+function fmt(n) {
+  if (n==null) return "–";
+  const abs=Math.abs(n), sign=n>=0?"+":"−";
+  if(abs>=1e6) return `${sign}${(abs/1e6).toFixed(2)}M`;
+  if(abs>=1e3) return `${sign}${(abs/1e3).toFixed(1)}k`;
+  return `${sign}${Math.round(abs)}`;
+}
+function fmtDate(d) {
+  if (!d) return "";
+  const months=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const [,m,day]=d.split("-"); return `${months[+m-1]} ${+day}`;
+}
+const cv = n => n>=0?'#3fb950':'#f85149';
+function scoreColor(s) { return s>=65?'#3fb950':s>=55?'#7ee787':s<=35?'#f85149':s<=45?'#ffa198':'#8b949e'; }
+function gaugeHTML(score) {
+  const col=scoreColor(score), filled=((score/100)*157).toFixed(1);
+  return `<svg width="110" height="68" viewBox="0 0 120 70">
+    <path d="M10,65 A50,50 0 0,1 110,65" fill="none" stroke="#21262d" stroke-width="10" stroke-linecap="round"/>
+    <path d="M10,65 A50,50 0 0,1 110,65" fill="none" stroke="${col}" stroke-width="10" stroke-linecap="round" stroke-dasharray="${filled} 157"/>
+    <text x="60" y="62" text-anchor="middle" fill="${col}" style="font-size:22px;font-family:'IBM Plex Mono',monospace;font-weight:700">${score}</text>
+  </svg>`;
+}
+
+// ── RENDER ──────────────────────────────────────────────────────────────────
+function renderStats(a) {
+  const oiFmt = a.latest.oi>1e6?`${(a.latest.oi/1e6).toFixed(2)}M`:`${(a.latest.oi/1e3).toFixed(0)}k`;
+  document.getElementById('statsRow').innerHTML = `
+    <div class="gauge-card">${gaugeHTML(a.score)}<div>
+      <div class="gauge-bias" style="color:${scoreColor(a.score)}">${a.bias}</div>
+      <div class="gauge-sub">COT Bias Signal</div></div></div>
+    <div class="stat-card">
+      <div class="stat-label">Large Spec Net</div>
+      <div class="stat-value" style="color:${cv(a.latest.lsNet)}">${fmt(a.latest.lsNet)}</div>
+      <div class="stat-sub">${a.pct}th pctl of data range</div></div>
+    <div class="stat-card">
+      <div class="stat-label">Week Change</div>
+      <div class="stat-value" style="color:${cv(a.weekChange)}">${fmt(a.weekChange)}</div>
+      <div class="stat-sub">${a.accelBull?'⚡ Accelerating bullish':a.accelBear?'⚡ Accelerating bearish':'No acceleration'}</div></div>
+    <div class="stat-card">
+      <div class="stat-label">13-Wk Cumulative</div>
+      <div class="stat-value" style="color:${cv(a.cumulative13)}">${fmt(a.cumulative13)}</div>
+      <div class="stat-sub">Directional momentum</div></div>
+    <div class="stat-card">
+      <div class="stat-label">Open Interest</div>
+      <div class="stat-value">${oiFmt}</div>
+      <div class="stat-sub">Total contracts</div></div>`;
+  document.getElementById('statsRow').style.display = 'flex';
+}
+
+function renderAnalysis(a) {
+  const M = s => `<span style="font-family:var(--mono);color:${s}">`
+  document.getElementById('cotText').innerHTML =
+    `Large speculators are ${a.latest.lsNet>=0?'net long':'net short'} at
+    ${M(cv(a.latest.lsNet))}${a.latest.lsNet.toLocaleString()} contracts</span>,
+    at the ${M('#f0e68c')}${a.pct}th percentile</span> of their available data range.
+    This week's change of ${M(cv(a.weekChange))}${fmt(a.weekChange)} contracts</span>
+    ${a.accelBull?'exceeds last week\'s pace — <strong>acceleration is the strongest bullish signal COT data can give.</strong>':
+      a.accelBear?'exceeds last week\'s pace to the downside — <strong>accelerating bearish conviction.</strong>':
+      'continues the recent positioning trend.'}
+    Over 13 weeks, large specs have moved ${M(cv(a.cumulative13))}${fmt(a.cumulative13)} contracts</span>
+    in the ${a.cumulative13>=0?'bullish':'bearish'} direction.`;
+  document.getElementById('cotBlock').style.display = 'block';
+
+  document.getElementById('takeText').innerHTML =
+    `<span style="color:var(--yellow);font-weight:600">BOTTOM LINE</span>: COT bias score is
+    <span style="font-family:var(--mono);color:var(--green);font-weight:700">${a.score}/100</span> (${a.bias}).
+    The <strong>direction of change</strong> matters more than the raw level.
+    ${a.weekChange>=0?'Large specs added length this week — bullish signal.':'Large specs added shorts this week — bearish signal.'}
+    ${a.accelBull
+      ? ' <span style="color:var(--green);font-weight:600">Pace of buying is accelerating — the strongest signal COT can give.</span> Institutional wind is at your back for longs. Look for pullbacks to support, not extended breakouts.'
+      : a.accelBear
+      ? ' <span style="color:var(--red);font-weight:600">Pace of selling is accelerating — strongest bearish COT signal.</span> Favor shorts on bounces to resistance.'
+      : a.cumulative13>0
+      ? ' 13-week trend is constructive but not yet accelerating. Bias longs, stay selective on entry.'
+      : ' 13-week trend is bearish. Caution on the long side until positioning reverses.'}`;
+  document.getElementById('takeBlock').style.display = 'block';
+}
+
+function renderChart(data, label) {
+  document.getElementById('chartPlaceholder').style.display = 'none';
+  const canvas = document.getElementById('mainChart');
+  canvas.style.display = 'block';
+  document.getElementById('chartTitle').textContent = `${label} — Net Positions by Trader Category`;
+
+  const slice = data.slice(-104);
+  const labels = slice.map(d => fmtDate(d.date));
+  const lsData   = slice.map(d => d.lsNet);
+  const commData = slice.map(d => d.commNet);
+  const ssData   = slice.map(d => d.ssNet);
+
+  if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
+
+  chartInstance = new Chart(canvas, {
+    type: 'bar',
+    data: { labels, datasets: [
+      { label:'Large Spec Net',  data:lsData,   backgroundColor:lsData.map(v=>v>=0?'rgba(240,230,140,0.85)':'rgba(184,148,63,0.85)'),  borderWidth:0, order:1 },
+      { label:'Commercial Net',  data:commData, backgroundColor:commData.map(v=>v>=0?'rgba(121,192,255,0.65)':'rgba(42,94,140,0.65)'),  borderWidth:0, order:2 },
+      { label:'Small Spec Net',  data:ssData,   backgroundColor:ssData.map(v=>v>=0?'rgba(255,166,87,0.65)':'rgba(122,69,32,0.65)'),     borderWidth:0, order:3 },
+    ]},
+    options: {
+      responsive:true, maintainAspectRatio:false, animation:false,
+      interaction:{ mode:'index', intersect:false },
+      plugins:{
+        legend:{ labels:{ color:'#8b949e', font:{ family:"'IBM Plex Mono',monospace", size:11 }, boxWidth:10, boxHeight:10 }},
+        tooltip:{
+          backgroundColor:'#0d1117', borderColor:'#30363d', borderWidth:1,
+          titleColor:'#8b949e', bodyColor:'#e6edf3',
+          bodyFont:{ family:"'IBM Plex Mono',monospace", size:12 },
+          titleFont:{ family:"'IBM Plex Mono',monospace", size:11 },
+          callbacks:{ label(ctx){ return ` ${ctx.dataset.label}: ${fmt(ctx.raw)}`; }}
+        }
+      },
+      scales:{
+        x:{ ticks:{ color:'#8b949e', font:{ family:"'IBM Plex Mono',monospace", size:10 }, maxTicksLimit:12 }, grid:{ color:'#21262d' }},
+        y:{ ticks:{ color:'#8b949e', font:{ family:"'IBM Plex Mono',monospace", size:10 }, callback:v=>`${(v/1000).toFixed(0)}k` }, grid:{ color:'#21262d' }}
+      }
+    }
+  });
+}
+
+function renderBiasChart(scores) {
+  const panel = document.getElementById('biasChartPanel');
+  panel.style.display = 'block';
+  const canvas = document.getElementById('biasChart');
+
+  const slice  = scores.slice(-104);
+  const labels = slice.map(d => fmtDate(d.date));
+  const vals   = slice.map(d => d.score);
+
+  // Color each bar by zone
+  const barColors = vals.map(v =>
+    v >= 65 ? 'rgba(63,185,80,0.85)'   :
+    v >= 55 ? 'rgba(126,231,135,0.75)' :
+    v <= 35 ? 'rgba(248,81,73,0.85)'   :
+    v <= 45 ? 'rgba(255,161,152,0.75)' :
+    'rgba(139,148,158,0.7)'
+  );
+
+  if (biasChartInstance) { biasChartInstance.destroy(); biasChartInstance = null; }
+
+  biasChartInstance = new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Bias Score',
+          data: vals,
+          backgroundColor: barColors,
+          borderWidth: 0,
+          order: 2,
+        },
+        {
+          // Neutral midline as a line dataset
+          label: 'Neutral (50)',
+          data: vals.map(() => 50),
+          type: 'line',
+          borderColor: 'rgba(139,148,158,0.4)',
+          borderWidth: 1,
+          borderDash: [4,4],
+          pointRadius: 0,
+          order: 1,
+        },
+        {
+          label: 'Bullish threshold (65)',
+          data: vals.map(() => 65),
+          type: 'line',
+          borderColor: 'rgba(63,185,80,0.3)',
+          borderWidth: 1,
+          borderDash: [3,5],
+          pointRadius: 0,
+          order: 1,
+        },
+        {
+          label: 'Bearish threshold (35)',
+          data: vals.map(() => 35),
+          type: 'line',
+          borderColor: 'rgba(248,81,73,0.3)',
+          borderWidth: 1,
+          borderDash: [3,5],
+          pointRadius: 0,
+          order: 1,
+        },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#0d1117', borderColor: '#30363d', borderWidth: 1,
+          titleColor: '#8b949e', bodyColor: '#e6edf3',
+          bodyFont: { family:"'IBM Plex Mono',monospace", size:12 },
+          titleFont: { family:"'IBM Plex Mono',monospace", size:11 },
+          filter: item => item.datasetIndex === 0,
+          callbacks: {
+            label(ctx) {
+              const s = ctx.raw;
+              const label = s>=65?'Bullish':s>=55?'Leaning Bullish':s<=35?'Bearish':s<=45?'Leaning Bearish':'Neutral';
+              return ` Score: ${s}/100 — ${label}`;
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { color:'#8b949e', font:{ family:"'IBM Plex Mono',monospace", size:10 }, maxTicksLimit:12 },
+          grid: { color:'#21262d' },
+        },
+        y: {
+          min: 0, max: 100,
+          ticks: {
+            color:'#8b949e', font:{ family:"'IBM Plex Mono',monospace", size:10 },
+            stepSize: 25,
+            callback: v => v === 50 ? 'Neutral' : v,
+          },
+          grid: { color:'#21262d' },
+        }
+      }
+    }
+  });
+}
+
+// ── MAIN ───────────────────────────────────────────────────────────────────
+async function loadData() {
+  const instr = INSTRUMENTS[+document.getElementById('instrSelect').value];
+  debugLines = [];
+  setStatus('● Fetching from CFTC...', 'loading');
+  ['statsRow','cotBlock','takeBlock'].forEach(id => document.getElementById(id).style.display='none');
+  document.getElementById('biasChartPanel').style.display = 'none';
+  document.getElementById('chartPlaceholder').style.display = 'flex';
+  document.getElementById('chartPlaceholder').textContent = 'Loading CFTC data...';
+  document.getElementById('mainChart').style.display = 'none';
+  document.getElementById('chartTitle').textContent = instr.label;
+
+  try {
+    const raw  = await fetchCOT(instr);
+    if (!raw.length) {
+      setStatus('✗ No records returned — click Debug', 'error');
+      document.getElementById('chartPlaceholder').textContent = 'No data returned. Click Debug to inspect the API response.';
+      return;
+    }
+    const data = processRecords(raw, instr.type);
+    log(`Processed: ${data.length} records | ${data[0]?.date} → ${data[data.length-1]?.date}`);
+
+    const a = computeAnalytics(data);
+    if (a) { renderStats(a); renderAnalysis(a); }
+    renderChart(data, instr.label);
+    const scores = computeHistoricalScores(data);
+    renderBiasChart(scores);
+    setStatus(`✓ ${data.length} weeks loaded · Latest: ${data[data.length-1]?.date}`, 'ok');
+  } catch(e) {
+    log(`Fatal: ${e.message}\n${e.stack}`);
+    setStatus(`✗ ${e.message}`, 'error');
+    document.getElementById('chartPlaceholder').textContent = `Error: ${e.message}. Click Debug for details.`;
+  }
+}
+
+loadData();
+</script>
+</body>
+</html>

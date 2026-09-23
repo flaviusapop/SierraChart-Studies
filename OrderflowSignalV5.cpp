@@ -1,0 +1,1251 @@
+// =============================================================================
+// OrderflowSignalV5.cpp
+// Sierra Chart ACSIL Custom Study  —  v5 (Direct Cross-Chart Source Reads)
+//
+// V5 = V4's timing layer (kept intact) + a rebuilt DATA LAYER. The downstream
+// scoring pipeline — rolling confluence sum, windowed arrow score, OTF filters,
+// fire levels, subgraph writes, membership-based alerts — is UNCHANGED from V4.
+// The ONLY thing that changed is HOW the per-bar score array is populated.
+//
+// Run V5 alongside V4 (and V3) on the same chart, different subgraph colors,
+// for a few days. V4 is the timing-fix baseline; V5 adds the correctness fix.
+//
+// =============================================================================
+// THE PROBLEM V5 FIXES
+// =============================================================================
+//   V3/V4 read every trigger through a Study Overlay, i.e. from sc.ChartNumber
+//   (the MAIN chart). A Study Overlay POINT-SAMPLES: for each main-chart bar it
+//   copies ONE source bar's value ("earliest" or "latest" — verified from SC's
+//   docs, there is no max/OR mode). When a source chart is FASTER than the main
+//   chart (Renko 6t vs an 8-range chart), several source bars fall inside one
+//   main bar and every event except the sampled one is silently discarded
+//   BEFORE this study ever sees the data. That is why the arrow count changes
+//   when the main chart's bar type changes, and why lower-timeframe triggers go
+//   missing. It is a transport bug, upstream of scoring — nothing V4 does can
+//   recover an event the overlay already dropped.
+//
+// =============================================================================
+// HOW V5 FIXES IT
+// =============================================================================
+//   V5 reads each trigger DIRECTLY from its source chart, so it receives the
+//   array indexed by the SOURCE chart's bars — nothing collapsed yet. It then:
+//
+//     1. detects the rising edge in SOURCE time, on the chart where the trigger
+//        is actually defined (no point-sampling, every distinct event survives)
+//     2. maps each source bar to the MAIN-chart bar that contains its timestamp,
+//        via a single O(nSrc + nDest) merge walk over the two DateTime arrays
+//        (built once per source chart, reused across all triggers on it)
+//     3. ACCUMULATES: score[destBar] += weight. Many source events inside one
+//        main bar ADD UP instead of overwriting each other.
+//
+//   Conservation: every source rising edge is credited to exactly one main bar.
+//   A mapping choice can shift an event by at most one bar; it can never delete
+//   or duplicate one. So the total arrow count becomes INVARIANT to the main
+//   chart's bar type. That is the acceptance test:
+//
+//       Same date range, flip the main chart 8-range -> 6-range -> flex renko.
+//       The total arrow count must be IDENTICAL. With V3/V4 it is not.
+//
+// =============================================================================
+// PER-TRIGGER CHART ROUTING  (and graceful migration)
+// =============================================================================
+//   Each trigger reference is now a CHART + STUDY + SUBGRAPH selector
+//   (SetChartStudySubgraphValues). This costs ZERO extra inputs — it writes the
+//   same union member as SetStudySubgraphValues, only the ValueType differs.
+//
+//   Chart number 0 is treated as "this chart" (the main chart). With chart 0 the
+//   source DateTime array is the main chart's own, the merge walk yields the
+//   IDENTITY map, and V5 reproduces the old overlay read exactly. So:
+//
+//     - All triggers at chart 0            -> V5 behaves like V4 (overlay read)
+//     - A trigger pointed at its source #  -> direct read, no pulse loss
+//
+//   Because the input ValueType changed from V4, saved V4 references do not
+//   carry over — but the defaults below are already the real source-chart
+//   addresses, so there should be little to re-pick.
+//
+//   DEFAULTS ARE THE LONG / BULLISH SET (35 triggers, 8 charts), taken from
+//   "OF-Triggers-For V5.docx". The short/bearish half of that document is not
+//   loaded. For both directions, run a SECOND instance of V5 configured with
+//   the short set and Trigger Position = "Above Candle".
+//
+//   SG6 "Debug: Connected" must read 36 once every reference resolves. Any
+//   lower value means a chart number is wrong for this chartbook, a study ID
+//   does not exist on that chart, or a source chart is closed.
+//
+//   Study IDs are SOURCE-chart IDs, not the main chart's overlay IDs — the same
+//   trigger has a different ID on each chart it appears on.
+//
+// =============================================================================
+// COST
+// =============================================================================
+//   Per update cycle: ~N trigger fetches (as V4) + one DateTime array + one
+//   merge walk per DISTINCT source chart (~7), each O(nSrc). A tail-only pass
+//   starts each source walk at the first source bar mapping into the window, so
+//   the per-tick cost stays bounded. Full pass only on recalc / bar-count
+//   change / connectivity change, same gate as V4.
+//
+// =============================================================================
+// SOURCE FIRE TIME  (Input 119)  —  where a source event lands on this chart
+// =============================================================================
+//   A source bar SPANS several main bars when the source is slower than the
+//   main chart (a 6-point range bar covers ~3 bars of a 2-point chart). One
+//   source event, several candidate main bars. Three placements:
+//
+//     Open   — the first main bar of the span, where the source bar STARTED.
+//              The event is not knowable until the source bar closes, so the
+//              arrow lands entirely in the past and has already spent most of
+//              its confluence lookback life by the time it appears.
+//     Close  — the main bar where the event became KNOWABLE (source bar close).
+//              DEFAULT. The arrow lands where you could act on it, and its full
+//              lookback window runs forward from there.
+//     Hold   — the weight is present on EVERY main bar of the span, through to
+//              the knowable bar, so a faster trigger firing anywhere inside the
+//              span can reach an arrow threshold together with it.
+//
+// TWO CHANNELS — why Hold does not inflate confluence
+// ---------------------------------------------------------------------------
+//   Arrays[0] EVENT score : the weight counted ONCE, at the event bar.
+//                           Feeds the rolling confluence sum. Never spans.
+//   Arrays[1] HELD  score : Open/Close -> identical to the event score.
+//                           Hold       -> weight on every bar of the span.
+//                           Feeds the arrow (Level 1/2/3) threshold.
+//
+//   Counting a held event once per bar in the confluence sum is exactly the V2
+//   inflation V3 was written to kill: one HTF trigger spanning 3 bars would
+//   contribute 3x and could clear the confluence threshold with nothing else
+//   agreeing. Raising the threshold cannot compensate, because the inflation is
+//   NOT UNIFORM — it scales with each source bar's span, which varies by source
+//   chart and with market speed. Separating the channels keeps the confluence
+//   number meaning the same thing it meant in V4.
+//
+//   Hold also dedupes the arrow: the held weight sits on every bar of the span,
+//   so without suppression the same setup prints an arrow on all of them. One
+//   arrow per episode; an upgrade to a higher tier may still print.
+//
+//   SG8 "Held Score" plots Arrays[1]. Put it over SG5 (event score) in region 2
+//   to see the difference directly: SG5 spikes on single bars, SG8 plateaus.
+//   In Open/Close the two lines are identical — that is the check that Hold is
+//   the only thing changing.
+//
+//   NOTE the two windows this interacts with:
+//     Lookback Window (103)      -> confluence, reads the EVENT channel
+//     Level 1/2/3 Window (116)   -> arrows, reads the HELD channel
+//   Input 116 is the blunt version of Hold (a fixed bar count for every
+//   trigger); Hold is the adaptive version (each trigger held for its own
+//   source bar's span). They compose — leave 116 at 1 when testing Hold.
+//
+// =============================================================================
+// STILL DEFERRED (not addressed in V5)
+// =============================================================================
+//   - Dead-tape confluence: on a quiet 8-range chart a bar can span hours, so
+//     two unrelated triggers hours apart can share a bar and read as
+//     confluence. Independent of V5; a max-bar-duration guard is backlog.
+//   - Session mismatch: source events outside the main chart's session map to
+//     the boundary bar. Keep all charts on identical session times.
+//
+// =============================================================================
+// SUBGRAPHS
+//   SG1 Level 1 / SG2 Level 2 / SG3 Level 3 arrows, SG4 Confluence background,
+//   SG5 Bar Score histogram, SG6 Debug Connected, SG7 Debug Firing,
+//   SG8 Held Score (V5 — what the arrow threshold actually sees).
+//   Move SG5-SG8 to region 2.
+//
+// INPUT LAYOUT  (123 total):
+//   [0..99]  Trigger 1-50  Input[2n]=Chart+Study+Subgraph  Input[2n+1]=Weight
+//   [100..116] as V4
+//   [117]  Count Forming Source Bar   (V5 — replaces V4 Live Bar Mode)
+//   [118]  Live Bar Latch
+//   [119]  Source Fire Time  Open / Close / Hold   (V5)
+//   [120]  Attribution Export: Enable            (default No)
+//   [121]  Attribution Export: File Path
+//   [122]  Attribution Export: Append To File     (default No = overwrite)
+//
+// AUX ARRAYS (sg_Level1.Arrays[]):
+//   [0] EVENT score per bar -> confluence   (persists across calls)
+//   [1] HELD  score per bar -> arrows       (persists across calls)
+//   [2] live bar arrow-score latch
+//
+// PERSISTENT INTS: 1 lastKnownBars, 5 everFullPass, 6 alertBaseBar,
+//   7 sigAlertMask, 8 confAlertMask, 9 lastConnCount, 10 recalcTries.
+// PERSISTENT POINTER: 1 attribution row vector (Attribution Export only;
+//   never allocated while Input 120 = No; freed on sc.LastCallToFunction).
+//
+// =============================================================================
+// ATTRIBUTION EXPORT  (Inputs 120-122)  —  per-trigger contribution CSV
+// =============================================================================
+//   Built to answer one question: of the ~36 bullish / ~39 bearish triggers,
+//   which ~10 per side are actually worth keeping so arrows print sooner?
+//   That call needs to see, per bar, which triggers fired and how late each
+//   one's contribution landed — information the study computes every pass
+//   and then discards, since only the summed score (Arrays[0]/[1]) survives
+//   into the subgraphs. This export captures it before it is thrown away.
+//
+//   FORMAT: LONG, one row per (bar, fired trigger) — not one row per bar.
+//   A pandas pivot on the join key (`dt`) reconstructs each bar's full score
+//   composition:  df.pivot_table(index='dt', columns='trigger_idx',
+//   values='weight', aggfunc='sum').sum(axis=1) must equal that bar's
+//   event_score (Open/Close) or a superset of it (Hold, where one firing can
+//   contribute rows to several bars — see lag_bars below).
+//
+//   COLUMNS (header row, comma-separated, CRLF, no quoting — trigger names
+//   with a comma are sanitized to a space):
+//     side            "long" or "short" (which study wrote the row)
+//     dt              sc.DateTimeToString(destBar, FLAG_DT_COMPLETE_DATETIME)
+//                     — THE JOIN KEY to the rest of the analysis pipeline
+//     bar             destBar index — NOT stable across reloads, informational
+//     tdate           sc.GetTradingDayDate(destBar), YYYYMMDD
+//     sess_s          seconds since midnight of destBar
+//     trigger_idx     0-based slot, 0..49
+//     trigger_name    name from the td[] default table for that slot
+//     weight          the weight actually applied (points, not the input index)
+//     src_chart       source chart number
+//     src_study       source study ID
+//     src_sg          source subgraph index
+//     src_dt          datetime of the SOURCE bar whose rising edge fired
+//     lag_bars        destBar minus the main-chart bar containing the START
+//                     of that source bar (spanStart) — the per-trigger
+//                     lateness measure this export exists to produce
+//     event_score     Arrays[0][destBar] after the full pass (this bar's total)
+//     held_score      Arrays[1][destBar] after the full pass (this bar's total)
+//     fire_level      0/1/2/3, this bar's arrow level if any
+//     fire_time_mode  Input 119 as text, so a pooled multi-day file stays
+//                     interpretable without cross-referencing settings
+//
+//   STALE NAMES: trigger_name is read from the compile-time td[] table. If a
+//   slot has been RE-POINTED in Study Settings since the DLL was last built,
+//   the name no longer matches what the slot actually reads — this is why
+//   src_chart/src_study/src_sg are ALSO emitted on every row: if they
+//   disagree with what Study Settings currently shows for that slot, trust
+//   the triple, not the name.
+//
+//   WRITTEN ON FULL RECALC ONLY (sc.IsFullRecalculation, same gate the alert
+//   mask reset already uses) — never on a tail-only pass, so a live chart
+//   does not rewrite the file every new bar. Disabled by default; when
+//   Input 120 = No, none of this allocates, opens a file, or costs anything.
+// =============================================================================
+
+#include "sierrachart.h"
+#include <vector>
+#include <string>
+#include <cstdio>
+
+SCDLLName("OrderflowSignalV5")
+
+static const int OFS5_TAIL_BASE = 256;
+static const int OFS5_TAIL_MAX  = 4096;
+static const int OFS5_TAIL_EDGE = 8;
+
+// -- Trigger defaults: LONG / BULLISH set -----------------------------
+// Source: "OF-Triggers-For V5.docx". 35 long triggers across 8 charts.
+// The short/bearish half of that document is deliberately NOT loaded —
+// run a second V5 instance with the short set and Trigger Position =
+// "Above Candle" if you want both directions.
+//
+// SUBGRAPH INDEX IS 0-BASED HERE, the document is 1-BASED:
+//   doc SG1 -> 0,  SG3 -> 2,  SG5 -> 4,  SG6 -> 5,  SG7 -> 6,  SG8 -> 7
+//
+// Chart numbers are the source charts from the document. Chart 0 would
+// mean "this chart"; none of these use it. If a chart number here does
+// not match your chartbook, fix it in Study Settings — SG6 "Debug:
+// Connected" must read 36 once every reference resolves.
+//
+//   #2  = 2.5 range      #4  = 2.0 range      #5  = 3.5 range
+//   #7  = 2.5 range      #10 = 4.5 range      #13 = 6.5 range
+//   #18 = 3.0 range
+//
+// SOURCE OF TRUTH: OF-Triggers-For-V5_Inputs.xlsx (TradingEdgeResources),
+// "Bullish" sheet — 36 triggers, 50 weight points, 7 charts. Regenerated
+// 2026-07-27 from the corrected sheet. Changes vs the previous table:
+//   - chart #9 (8t renko) REMOVED entirely (was 3 triggers / 4 points)
+//   - chart #12 -> #18, and its 2 triggers replaced by the sheet's 6
+//   - chart #10 is 4.5 range, not 4.0, and uses ID9/ID1/ID25 (was ID69/ID64/ID32)
+//   - chart #4 now reads ID1.SG31/35/37 (was ID49.SG1 / ID16.SG1)
+//   - #2 "Long Volume Momentum" ID7.SG1 dropped (not in the sheet)
+//   - #5 "Exhaustion Reversal Long" is ID31.SG3, not ID31.SG6
+//
+// HOISTED TO FILE SCOPE (not just the SetDefaults block): the attribution
+// export (Inputs 120-122, below) needs to look up a slot's default name at
+// CSV-write time, which happens outside SetDefaults. Single source of truth
+// — SetDefaults' input-population loop reads this same table, so the
+// export can never drift from what the input defaults actually are. Values
+// are unchanged from before the hoist.
+struct s_TrigDef { int chart; int studyID; int sgIdx; int weight; const char* name; };
+static const s_TrigDef td[50] = {
+    // ---- chart #2, 2.5 range ----
+    { 2,  1,  0, 1, "Long Delta Smart Triggers"  },  // ID1.SG1
+    { 2,  6,  0, 1, "Bullish Delta Trap"         },  // ID6.SG1
+    { 2,  6,  5, 1, "Bullish Reversal"           },  // ID6.SG6
+    { 2,  7,  2, 1, "Long Exhaustion Reversal"   },  // ID7.SG3
+    { 2, 10,  2, 2, "Long Slingshot 3-Bar"       },  // ID10.SG3
+    { 2, 10,  4, 2, "Long FADE Trigger"          },  // ID10.SG5
+    { 2, 10,  6, 1, "Long ABS"                   },  // ID10.SG7
+    // ---- chart #4, 2.0 range ----
+    { 4,  1, 30, 2, "Long BUY 8"                 },  // ID1.SG31
+    { 4,  1, 34, 2, "POCL Long"                  },  // ID1.SG35
+    { 4,  1, 36, 1, "POC WAVE Buy"               },  // ID1.SG37
+    // ---- chart #5, 3.5 range ----
+    { 5, 24,  4, 1, "Long OF trigger A"          },  // ID24.SG5
+    { 5, 24,  5, 1, "Long OF trigger B"          },  // ID24.SG6
+    { 5, 30,  0, 1, "Long ABS"                   },  // ID30.SG1
+    { 5, 31,  2, 1, "Exhaustion Reversal Long"   },  // ID31.SG3
+    { 5, 33,  5, 1, "Delta Flip Up"              },  // ID33.SG6
+    // ---- chart #7, 2.5 range ----
+    { 7, 16,  0, 2, "Long BUY 10"                },  // ID16.SG1
+    { 7, 21,  0, 1, "Bullish Vol Seq Div"        },  // ID21.SG1
+    { 7, 31,  0, 2, "Long POCS 10"               },  // ID31.SG1
+    { 7, 32,  0, 1, "Delta Trap Signal Long"     },  // ID32.SG1
+    { 7, 49,  0, 1, "Long DeltaUp+"              },  // ID49.SG1
+    { 7, 64,  0, 1, "Long POC WAVE"              },  // ID64.SG1
+    // ---- chart #10, 4.5 range ----
+    {10,  1,  0, 1, "Long POC Momentum"          },  // ID1.SG1
+    {10,  9,  4, 2, "Long OF L1"                 },  // ID9.SG5
+    {10,  9,  5, 2, "Long OF L2"                 },  // ID9.SG6
+    {10, 25,  1, 1, "Delta Flip Up - Basic"      },  // ID25.SG2
+    // ---- chart #13, 6.5 range ----
+    {13,  1,  2, 2, "Long Slingshot 3-Bar"       },  // ID1.SG3
+    {13,  1,  4, 2, "Long FADE Trigger"          },  // ID1.SG5
+    {13,  1,  6, 1, "Long ABS"                   },  // ID1.SG7
+    {13,  9,  4, 2, "Long OF L1"                 },  // ID9.SG5
+    {13,  9,  5, 2, "Long OF L2"                 },  // ID9.SG6
+    // ---- chart #18, 3.0 range ----
+    {18,  1, 22, 1, "OF Long v1"                 },  // ID1.SG23
+    {18,  1, 28, 1, "Bullish Vol Seq"            },  // ID1.SG29
+    {18,  1, 30, 2, "Long 3 Bar Slingshot"       },  // ID1.SG31
+    {18,  1, 32, 1, "Delta Trap Long"            },  // ID1.SG33
+    {18,  1, 34, 2, "POCL Long"                  },  // ID1.SG35
+    {18,  1, 36, 1, "Long POC Wave"              },  // ID1.SG37
+    // ---- free slots ----
+    { 0,  0, 0, 0, "" }, { 0,  0, 0, 0, "" }, { 0,  0, 0, 0, "" },
+    { 0,  0, 0, 0, "" }, { 0,  0, 0, 0, "" }, { 0,  0, 0, 0, "" },
+    { 0,  0, 0, 0, "" }, { 0,  0, 0, 0, "" }, { 0,  0, 0, 0, "" },
+    { 0,  0, 0, 0, "" }, { 0,  0, 0, 0, "" }, { 0,  0, 0, 0, "" },
+    { 0,  0, 0, 0, "" }, { 0,  0, 0, 0, "" },
+};
+
+// -----------------------------------------------------------------------
+// Attribution export row — one per (destBar, triggerIndex) actually
+// written by the score accumulation loop. Held in a std::vector behind a
+// per-instance persistent pointer, same pattern as MultiLab.cpp's MLTrade
+// vector (MultiLab.cpp: MLGetTrades / SetPersistentPointer(1) / delete on
+// sc.LastCallToFunction). Deliberately NOT `static` — MultiLab.cpp has an
+// explicit comment (around its Pass A cell array) about a plain `static`
+// mixing state across every chart the DLL is attached to; GetPersistentPointer
+// is per-study-instance and does not have that problem.
+// -----------------------------------------------------------------------
+struct OFS5AttribRow
+{
+    int        destBar;
+    int        triggerIdx;
+    int        weight;
+    int        srcChart;
+    int        srcStudy;
+    int        srcSg;
+    SCDateTime srcDT;
+    int        lagBars;
+};
+
+static std::vector<OFS5AttribRow>* OFS5GetAttribRows(SCStudyInterfaceRef sc)
+{
+    std::vector<OFS5AttribRow>* p = (std::vector<OFS5AttribRow>*)sc.GetPersistentPointer(1);
+    if (p == NULL)
+    {
+        p = new std::vector<OFS5AttribRow>();
+        sc.SetPersistentPointer(1, p);
+    }
+    return p;
+}
+
+// =============================================================================
+// ATTRIBUTION EXPORT — CSV writer. See the banner comment near the top of
+// this file for the full column list and design rationale. I/O mechanics
+// (fopen/fprintf/fclose, not sc.OpenFile) match MultiLab.cpp's CSV export
+// verbatim, so failure modes are consistent with the rest of the toolchain.
+// Called ONLY from inside `if (isFullRecalc)`, i.e. once per full recalc,
+// never on a tail-only pass.
+// =============================================================================
+static void OFS5WriteAttributionCSV(SCStudyInterfaceRef sc, const char* sideLabel,
+    SCInputRef in_AttribPath, SCInputRef in_AttribAppend, int fireMode,
+    const std::vector<OFS5AttribRow>& rows,
+    SCSubgraphRef sg_Level1, SCSubgraphRef sg_Level2, SCSubgraphRef sg_Level3)
+{
+    const SCString path = in_AttribPath.GetString();
+    if (path.GetLength() == 0)
+        return;
+
+    const bool append = (in_AttribAppend.GetYesNo() != 0);
+    FILE* f = fopen(path.GetChars(), append ? "a" : "w");
+    if (f == NULL)
+    {
+        SCString msg;
+        msg.Format("Attribution Export: failed to open '%s' for writing", path.GetChars());
+        sc.AddMessageToLog(msg, 1);
+        return;
+    }
+
+    // Header only on a fresh/empty file: "w" is always fresh; "a" only gets
+    // a header the first time a file is created, so pooling many recalcs (or
+    // many days, via manual append) into one file never scatters header rows
+    // through the data — which would break the "no quoting" column count.
+    fseek(f, 0, SEEK_END);
+    const bool writeHeader = (ftell(f) == 0);
+
+    if (writeHeader)
+    {
+        fprintf(f,
+            "side,dt,bar,tdate,sess_s,trigger_idx,trigger_name,weight,"
+            "src_chart,src_study,src_sg,src_dt,lag_bars,"
+            "event_score,held_score,fire_level,fire_time_mode\r\n");
+    }
+
+    const char* fireModeStr = (fireMode == 0) ? "Open" : (fireMode == 1) ? "Close" : "Hold";
+
+    for (size_t i = 0; i < rows.size(); ++i)
+    {
+        const OFS5AttribRow& r = rows[i];
+
+        const SCString dt    = sc.DateTimeToString(sc.BaseDateTimeIn[r.destBar], FLAG_DT_COMPLETE_DATETIME);
+        const SCString srcDt = sc.DateTimeToString(r.srcDT, FLAG_DT_COMPLETE_DATETIME);
+        const int      tdate = sc.GetTradingDayDate(sc.BaseDateTimeIn[r.destBar]);
+        const int      sessS = sc.BaseDateTimeIn[r.destBar].GetTime();
+
+        // Name from the compile-time default table — see the STALE NAME note
+        // in the top-of-file banner. Commas are illegal in this no-quoting
+        // format; replace defensively, same defensive move MultiLab.cpp makes
+        // for its free-text source_name column.
+        std::string name = (r.triggerIdx >= 0 && r.triggerIdx < 50) ? td[r.triggerIdx].name : "";
+        for (size_t ci = 0; ci < name.size(); ++ci)
+            if (name[ci] == ',') name[ci] = ' ';
+
+        int fireLevel = 0;
+        if      (sg_Level3[r.destBar] != 0.0f) fireLevel = 3;
+        else if (sg_Level2[r.destBar] != 0.0f) fireLevel = 2;
+        else if (sg_Level1[r.destBar] != 0.0f) fireLevel = 1;
+
+        const float eventScore = sg_Level1.Arrays[0][r.destBar];
+        const float heldScore  = sg_Level1.Arrays[1][r.destBar];
+
+        fprintf(f,
+            "%s,%s,%d,%d,%d,%d,%s,%d,%d,%d,%d,%s,%d,%.2f,%.2f,%d,%s\r\n",
+            sideLabel, dt.GetChars(), r.destBar, tdate, sessS,
+            r.triggerIdx, name.c_str(), r.weight,
+            r.srcChart, r.srcStudy, r.srcSg, srcDt.GetChars(), r.lagBars,
+            eventScore, heldScore, fireLevel, fireModeStr);
+    }
+
+    fclose(f);
+}
+
+// =============================================================================
+SCSFExport scsf_OrderflowSignalV5(SCStudyInterfaceRef sc)
+{
+    // -------------------------------------------------------------------------
+    // SUBGRAPHS
+    // -------------------------------------------------------------------------
+    SCSubgraphRef sg_Level1     = sc.Subgraph[0];
+    SCSubgraphRef sg_Level2     = sc.Subgraph[1];
+    SCSubgraphRef sg_Level3     = sc.Subgraph[2];
+    SCSubgraphRef sg_Confluence = sc.Subgraph[3];
+    SCSubgraphRef sg_Score      = sc.Subgraph[4];
+    SCSubgraphRef sg_DbgConn    = sc.Subgraph[5];
+    SCSubgraphRef sg_DbgFire    = sc.Subgraph[6];
+    SCSubgraphRef sg_Held       = sc.Subgraph[7];
+
+    // -------------------------------------------------------------------------
+    // INPUT ALIASES
+    // -------------------------------------------------------------------------
+    SCInputRef in_Level1Thresh     = sc.Input[100];
+    SCInputRef in_Level2Thresh     = sc.Input[101];
+    SCInputRef in_Level3Thresh     = sc.Input[102];
+    SCInputRef in_LookbackBars     = sc.Input[103];
+    SCInputRef in_ConfluenceThresh = sc.Input[104];
+    SCInputRef in_OffsetTicks      = sc.Input[105];
+    SCInputRef in_TriggerPosition  = sc.Input[106];
+    SCInputRef in_AlertSignal      = sc.Input[107];
+    SCInputRef in_AlertConfluence  = sc.Input[108];
+    SCInputRef in_EnableOTFArrow   = sc.Input[109];
+    SCInputRef in_OTFArrowSlot1    = sc.Input[110];
+    SCInputRef in_OTFArrowSlot2    = sc.Input[111];
+    SCInputRef in_EnableOTFConf    = sc.Input[112];
+    SCInputRef in_OTFConfSlot1     = sc.Input[113];
+    SCInputRef in_OTFConfSlot2     = sc.Input[114];
+    SCInputRef in_SubpanelMode     = sc.Input[115];
+    SCInputRef in_ArrowWindow      = sc.Input[116];
+    SCInputRef in_CountFormingSrc  = sc.Input[117];
+    SCInputRef in_LiveBarLatch     = sc.Input[118];
+    SCInputRef in_FireTime         = sc.Input[119];
+    SCInputRef in_AttribEnable     = sc.Input[120];
+    SCInputRef in_AttribPath       = sc.Input[121];
+    SCInputRef in_AttribAppend     = sc.Input[122];
+
+    // =========================================================================
+    // SET DEFAULTS
+    // =========================================================================
+    if (sc.SetDefaults)
+    {
+        sc.GraphName        = "Orderflow Signal V5";
+        sc.StudyDescription =
+            "V5: direct cross-chart source reads. Rising edge detected in source "
+            "time, merge-walk mapped to the main bar, events accumulated. Arrow "
+            "count invariant to main-chart bar type. AutoLoop=0.";
+        sc.AutoLoop     = 0;
+        sc.GraphRegion  = 1;
+        sc.FreeDLL      = 0;
+        sc.DrawZeros    = 0;
+        sc.UpdateAlways = 1;
+
+        // Run AFTER anything this study reads on its own chart (OTF filters, any
+        // remaining overlays used at chart 0). sierrachart.h:2554.
+        sc.CalculationPrecedence = VERY_LOW_PREC_LEVEL;
+
+        sg_Level1.Name         = "Level 1 Signal  (Low Conviction)";
+        sg_Level1.DrawStyle    = DRAWSTYLE_ARROWUP;
+        sg_Level1.LineWidth    = 5;
+        sg_Level1.PrimaryColor = RGB(220, 220, 0);
+        sg_Level1.DrawZeros    = 0;
+
+        sg_Level2.Name         = "Level 2 Signal  (Medium Conviction)";
+        sg_Level2.DrawStyle    = DRAWSTYLE_ARROWUP;
+        sg_Level2.LineWidth    = 5;
+        sg_Level2.PrimaryColor = RGB(220, 140, 0);
+        sg_Level2.DrawZeros    = 0;
+
+        sg_Level3.Name         = "Level 3 Signal  (High Conviction)";
+        sg_Level3.DrawStyle    = DRAWSTYLE_ARROWUP;
+        sg_Level3.LineWidth    = 5;
+        sg_Level3.PrimaryColor = RGB(0, 220, 80);
+        sg_Level3.DrawZeros    = 0;
+
+        sg_Confluence.Name         = "Confluence  (Lookback Background)";
+        sg_Confluence.DrawStyle    = DRAWSTYLE_BACKGROUND;
+        sg_Confluence.PrimaryColor = RGB(100, 160, 255);
+        sg_Confluence.DrawZeros    = 0;
+        sg_Confluence.DisplayNameValueInWindowsFlags = 0;
+
+        sg_Score.Name         = "Bar Score";
+        sg_Score.DrawStyle    = DRAWSTYLE_BAR;
+        sg_Score.LineWidth    = 2;
+        sg_Score.PrimaryColor = RGB(120, 120, 120);
+        sg_Score.DrawZeros    = 0;
+
+        sg_DbgConn.Name         = "Debug: Connected Triggers";
+        sg_DbgConn.DrawStyle    = DRAWSTYLE_LINE;
+        sg_DbgConn.LineWidth    = 2;
+        sg_DbgConn.PrimaryColor = RGB(200, 200, 0);
+        sg_DbgConn.DrawZeros    = 1;
+
+        sg_DbgFire.Name         = "Debug: Firing Triggers";
+        sg_DbgFire.DrawStyle    = DRAWSTYLE_LINE;
+        sg_DbgFire.LineWidth    = 2;
+        sg_DbgFire.PrimaryColor = RGB(0, 200, 200);
+        sg_DbgFire.DrawZeros    = 1;
+
+        // Held score = what the ARROW threshold is actually compared against.
+        // In Open/Close it equals the event score (SG5) exactly. In Hold it
+        // plateaus across each source bar's span — put this over SG5 in region 2
+        // and the difference between V4 semantics and Hold is visible directly:
+        // SG5 spikes on single bars, SG8 forms plateaus.
+        sg_Held.Name         = "Held Score  (drives arrows)";
+        sg_Held.DrawStyle    = DRAWSTYLE_LINE;
+        sg_Held.LineWidth    = 2;
+        sg_Held.PrimaryColor = RGB(255, 140, 220);
+        sg_Held.DrawZeros    = 1;
+
+        // -- Trigger defaults: LONG / BULLISH set -----------------------------
+        // Table itself is now FILE SCOPE (see `td[]` above SCSFExport) so the
+        // attribution export can read trigger names outside SetDefaults; this
+        // loop just populates the inputs from that single source of truth.
+        for (int i = 0; i < 50; ++i)
+        {
+            // Input names are POSITIONAL ONLY — "Trigger N", never the trigger's
+            // name. The chart/study/subgraph the slot points at is already shown
+            // by the input control itself, and a name baked into the label goes
+            // stale the moment the table is re-pointed. The td[] comments are the
+            // place to read what slot N is for.
+            SCString refName;
+            refName.Format("Trigger %d", i + 1);
+
+            sc.Input[i * 2].Name = refName;
+            sc.Input[i * 2].SetChartStudySubgraphValues(td[i].chart, td[i].studyID, td[i].sgIdx);
+
+            SCString wtName;
+            wtName.Format("Trigger %d Weight", i + 1);
+            sc.Input[i * 2 + 1].Name = wtName;
+            sc.Input[i * 2 + 1].SetCustomInputStrings("0 - Disabled;1 Point;2 Points;3 Points");
+            sc.Input[i * 2 + 1].SetCustomInputIndex(td[i].weight);
+        }
+
+        in_Level1Thresh.Name = "Level 1 Threshold  (min score for any arrow)";
+        in_Level1Thresh.SetInt(3);
+        in_Level1Thresh.SetIntLimits(1, 150);
+
+        in_Level2Thresh.Name = "Level 2 Threshold";
+        in_Level2Thresh.SetInt(5);
+        in_Level2Thresh.SetIntLimits(1, 150);
+
+        in_Level3Thresh.Name = "Level 3 Threshold  (highest conviction)";
+        in_Level3Thresh.SetInt(8);
+        in_Level3Thresh.SetIntLimits(1, 150);
+
+        in_LookbackBars.Name = "Lookback Window  (bars for rolling sum)";
+        in_LookbackBars.SetInt(5);
+        in_LookbackBars.SetIntLimits(1, 200);
+
+        in_ConfluenceThresh.Name = "Confluence Threshold  (rolling sum to fire background)";
+        in_ConfluenceThresh.SetInt(6);
+        in_ConfluenceThresh.SetIntLimits(1, 450);
+
+        in_OffsetTicks.Name = "Signal Offset  (ticks from High or Low)";
+        in_OffsetTicks.SetFloat(2.0f);
+        in_OffsetTicks.SetFloatLimits(0.0f, 200.0f);
+
+        in_TriggerPosition.Name = "Trigger Position  (also update arrow Draw Style to match)";
+        in_TriggerPosition.SetCustomInputStrings(
+            "Below Candle  (arrow up,   offset from Low);"
+            "Above Candle  (arrow down, offset from High)");
+        in_TriggerPosition.SetCustomInputIndex(0);
+
+        in_AlertSignal.Name = "Signal Alert  (fires when Level 1 / 2 / 3 arrow prints)";
+        in_AlertSignal.SetAlertSoundNumber(0);
+
+        in_AlertConfluence.Name = "Confluence Alert  (fires on onset of a new confluence zone)";
+        in_AlertConfluence.SetAlertSoundNumber(0);
+
+        in_EnableOTFArrow.Name = "Enable OTF Filter for Arrows";
+        in_EnableOTFArrow.SetCustomInputStrings("No;Yes");
+        in_EnableOTFArrow.SetCustomInputIndex(0);
+
+        in_OTFArrowSlot1.Name = "Arrow OTF Slot 1";
+        in_OTFArrowSlot1.SetStudySubgraphValues(0, 0);
+
+        in_OTFArrowSlot2.Name = "Arrow OTF Slot 2  (optional - AND with Slot 1)";
+        in_OTFArrowSlot2.SetStudySubgraphValues(0, 0);
+
+        in_EnableOTFConf.Name = "Enable OTF Filter for Confluence";
+        in_EnableOTFConf.SetCustomInputStrings("No;Yes");
+        in_EnableOTFConf.SetCustomInputIndex(0);
+
+        in_OTFConfSlot1.Name = "Confluence OTF Slot 1";
+        in_OTFConfSlot1.SetStudySubgraphValues(0, 0);
+
+        in_OTFConfSlot2.Name = "Confluence OTF Slot 2  (optional - AND with Slot 1)";
+        in_OTFConfSlot2.SetStudySubgraphValues(0, 0);
+
+        in_SubpanelMode.Name = "Sub-panel Mode  (arrows at level 1/2/3 instead of price)";
+        in_SubpanelMode.SetCustomInputStrings(
+            "No  (price chart - arrows at Low / High + offset);"
+            "Yes  (sub-panel - arrows at Y=1 / 2 / 3)");
+        in_SubpanelMode.SetCustomInputIndex(0);
+
+        in_ArrowWindow.Name = "Level 1/2/3 Window  (bars to accumulate arrow score; 1 = current bar only)";
+        in_ArrowWindow.SetInt(1);
+        in_ArrowWindow.SetIntLimits(1, 1000000);
+
+        in_CountFormingSrc.Name = "Count Forming Source Bar  (provisional; may retract)";
+        in_CountFormingSrc.SetCustomInputStrings(
+            "No  (closed source bars only - deterministic);"
+            "Yes  (include the forming source bar - fastest, can retract)");
+        in_CountFormingSrc.SetCustomInputIndex(0);
+
+        in_LiveBarLatch.Name = "Live Bar Latch  (forming main bar score never decreases)";
+        in_LiveBarLatch.SetCustomInputStrings(
+            "No  (live arrow can disappear if a source retracts);"
+            "Yes  (live arrow is sticky until the bar closes)");
+        in_LiveBarLatch.SetCustomInputIndex(1);
+
+        in_FireTime.Name = "Source Fire Time  (where a source event lands on this chart)";
+        in_FireTime.SetCustomInputStrings(
+            "Open  (first main bar of the source bar's span);"
+            "Close  (main bar where the event became knowable);"
+            "Hold  (every main bar of the span - arrows only)");
+        in_FireTime.SetCustomInputIndex(1);   // Close = default baseline
+
+        // ---- Attribution export (Inputs 120-122) — see banner comment -----
+        in_AttribEnable.Name = "Attribution Export: Enable  (per-trigger CSV, full recalc only)";
+        in_AttribEnable.SetYesNo(0);
+
+        in_AttribPath.Name = "Attribution Export: File Path";
+        in_AttribPath.SetString("C:\\SierraChart\\Data\\attribution_v5.csv");
+
+        in_AttribAppend.Name = "Attribution Export: Append To File  (No = overwrite on full recalc)";
+        in_AttribAppend.SetYesNo(0);
+
+        return;
+    }
+
+    // =========================================================================
+    // LAST CALL — free the persistent attribution row vector. Only ever
+    // allocated when Input 120 is enabled; deleting NULL is a no-op if the
+    // export was never turned on this session (same lifecycle as MultiLab's
+    // MLTrade vector, MultiLab.cpp ~1298-1307).
+    // =========================================================================
+    if (sc.LastCallToFunction)
+    {
+        std::vector<OFS5AttribRow>* p = (std::vector<OFS5AttribRow>*)sc.GetPersistentPointer(1);
+        if (p != NULL)
+        {
+            delete p;
+            sc.SetPersistentPointer(1, NULL);
+        }
+        return;
+    }
+
+    // =========================================================================
+    // GUARD
+    // =========================================================================
+    const int totalBars = sc.ArraySize;
+    if (totalBars < 2)
+        return;
+
+    const int lastBar = totalBars - 1;
+
+    // =========================================================================
+    // READ SETTINGS
+    // =========================================================================
+    const float l1       = static_cast<float>(in_Level1Thresh.GetInt());
+    const float l2       = static_cast<float>(in_Level2Thresh.GetInt());
+    const float l3       = static_cast<float>(in_Level3Thresh.GetInt());
+    const float ct       = static_cast<float>(in_ConfluenceThresh.GetInt());
+    const float offset   = in_OffsetTicks.GetFloat() * sc.TickSize;
+    const int   lookback = in_LookbackBars.GetInt();
+    int         arrowWindowRaw = in_ArrowWindow.GetInt();
+    const int   arrowWindow = (arrowWindowRaw < 1) ? 1 : arrowWindowRaw;
+    const int   position = in_TriggerPosition.GetIndex();
+    const int   sigSound  = in_AlertSignal.GetInt();
+    const int   confSound = in_AlertConfluence.GetInt();
+    const bool  subpanel  = (in_SubpanelMode.GetIndex() == 1);
+    const bool  countFormingSrc = (in_CountFormingSrc.GetIndex() == 1);
+    const bool  useLiveLatch     = (in_LiveBarLatch.GetIndex() == 1);
+
+    // 0 = Open, 1 = Close, 2 = Hold
+    const int   fireMode = in_FireTime.GetIndex();
+    const bool  holdMode = (fireMode == 2);
+
+    // Attribution export: cheap bool read, no cost when No (the default).
+    const bool  exportEnabled = (in_AttribEnable.GetYesNo() != 0);
+
+    // =========================================================================
+    // DATA LAYER  >>> BEGIN <<<   (V5: direct cross-chart reads)
+    //
+    // Fetch each trigger array from ITS OWN source chart. Chart 0 -> this chart.
+    // Also record the resolved source chart per trigger and the set of distinct
+    // source charts, so the merge-walk map is built once per chart below.
+    // =========================================================================
+    SCFloatArray trigData[50];
+    int          trigWeight[50]  = {};
+    int          trigChart[50]   = {};   // resolved source chart number
+    int          trigStudyID[50] = {};   // attribution export: src_study column
+    int          trigSgIdx[50]   = {};   // attribution export: src_sg column
+    bool         trigActive[50] = {};
+    bool         hasConfiguredTriggers = false;
+    int          totalConnected        = 0;
+
+    int          distinctCharts[64];
+    int          nDistinct = 0;
+
+    for (int t = 0; t < 50; ++t)
+    {
+        const int weight = sc.Input[t * 2 + 1].GetIndex();
+        if (weight == 0)
+            continue;
+
+        s_ChartStudySubgraphValues cs = sc.Input[t * 2].GetChartStudySubgraphValues();
+        const int studyID = cs.StudyID;
+        if (studyID == 0)
+            continue;
+
+        int chartNum = cs.ChartNumber;
+        if (chartNum <= 0)
+            chartNum = sc.ChartNumber;      // 0 = "this chart"
+
+        hasConfiguredTriggers = true;
+        trigWeight[t]  = weight;
+        trigChart[t]   = chartNum;
+        trigStudyID[t] = studyID;
+        trigSgIdx[t]   = cs.SubgraphIndex;
+
+        sc.GetStudyArrayFromChartUsingID(chartNum, studyID, cs.SubgraphIndex, trigData[t]);
+
+        if (trigData[t].GetArraySize() > 0)
+        {
+            trigActive[t] = true;
+            ++totalConnected;
+
+            bool seen = false;
+            for (int c = 0; c < nDistinct; ++c)
+                if (distinctCharts[c] == chartNum) { seen = true; break; }
+            if (!seen && nDistinct < 64)
+                distinctCharts[nDistinct++] = chartNum;
+        }
+    }
+    // ========================= DATA LAYER  >>> END <<< ========================
+
+    // -------------------------------------------------------------------------
+    // STARTUP / CONNECTIVITY GUARD  (as V4)
+    // -------------------------------------------------------------------------
+    int& lastConnCount = sc.GetPersistentInt(9);
+    int& recalcTries   = sc.GetPersistentInt(10);
+
+    if (hasConfiguredTriggers && totalConnected == 0)
+    {
+        if (recalcTries < 3)
+        {
+            ++recalcTries;
+            sc.FlagFullRecalculate = 1;
+        }
+        return;
+    }
+
+    const bool connChanged = (totalConnected != lastConnCount);
+    lastConnCount = totalConnected;
+    recalcTries   = 0;
+
+    // =========================================================================
+    // PRE-FETCH OTF ARRAYS  (main chart, as V4)
+    // =========================================================================
+    SCFloatArray otfArrow1, otfArrow2, otfConf1, otfConf2;
+    const bool useOTFArrow = (in_EnableOTFArrow.GetIndex() == 1);
+    const bool useOTFConf  = (in_EnableOTFConf.GetIndex()  == 1);
+
+    if (useOTFArrow)
+    {
+        const int id1 = in_OTFArrowSlot1.GetStudyID();
+        if (id1 > 0)
+            sc.GetStudyArrayFromChartUsingID(sc.ChartNumber, id1,
+                in_OTFArrowSlot1.GetSubgraphIndex(), otfArrow1);
+
+        const int id2 = in_OTFArrowSlot2.GetStudyID();
+        if (id2 > 0)
+            sc.GetStudyArrayFromChartUsingID(sc.ChartNumber, id2,
+                in_OTFArrowSlot2.GetSubgraphIndex(), otfArrow2);
+    }
+
+    if (useOTFConf)
+    {
+        const int id1 = in_OTFConfSlot1.GetStudyID();
+        if (id1 > 0)
+            sc.GetStudyArrayFromChartUsingID(sc.ChartNumber, id1,
+                in_OTFConfSlot1.GetSubgraphIndex(), otfConf1);
+
+        const int id2 = in_OTFConfSlot2.GetStudyID();
+        if (id2 > 0)
+            sc.GetStudyArrayFromChartUsingID(sc.ChartNumber, id2,
+                in_OTFConfSlot2.GetSubgraphIndex(), otfConf2);
+    }
+
+    // =========================================================================
+    // PASS WINDOW  (as V4)
+    // =========================================================================
+    int& lastKnownBars = sc.GetPersistentInt(1);
+    int& everFullPass  = sc.GetPersistentInt(5);
+
+    const bool isFullRecalc = (sc.UpdateStartIndex == 0) || sc.IsFullRecalculation;
+    const bool barsChanged  = (totalBars != lastKnownBars);
+
+    int tail = OFS5_TAIL_BASE;
+    if (lookback    > tail) tail = lookback;
+    if (arrowWindow > tail) tail = arrowWindow;
+    if (tail > OFS5_TAIL_MAX) tail = OFS5_TAIL_MAX;
+    tail += OFS5_TAIL_EDGE;
+
+    const bool doFullPass  = isFullRecalc || barsChanged || connChanged || (everFullPass == 0);
+    const int  windowStart = doFullPass
+                           ? 0
+                           : ((totalBars - tail > 0) ? (totalBars - tail) : 0);
+
+    lastKnownBars = totalBars;
+    everFullPass  = 1;
+
+    // -------------------------------------------------------------------------
+    // Attribution export capture gate — ONLY true on a genuine full recalc
+    // (isFullRecalc), never on a barsChanged-only tail pass (which fires on
+    // every new bar and would otherwise thrash the vector/file constantly).
+    // isFullRecalc implies windowStart == 0 above, so the capture below always
+    // sees the whole bar range. NULL / false when Input 120 = No: no
+    // allocation, no vector touched, nothing to clear.
+    // -------------------------------------------------------------------------
+    const bool captureAttrib = exportEnabled && isFullRecalc;
+    std::vector<OFS5AttribRow>* attribRows = NULL;
+    if (captureAttrib)
+    {
+        attribRows = OFS5GetAttribRows(sc);
+        attribRows->clear();
+    }
+
+    // =========================================================================
+    // SCORE ACCUMULATION  (V5 core — replaces V4's per-bar trigger loop)
+    //
+    // Zero the score window, then for each distinct source chart build the
+    // source-bar -> main-bar map once and walk every trigger on that chart,
+    // adding its weight to the containing main bar on each SOURCE rising edge.
+    // Scores below windowStart persist in Arrays[0] from the last full pass.
+    // =========================================================================
+    for (int i = windowStart; i <= lastBar; ++i)
+    {
+        sg_Level1.Arrays[0][i] = 0.0f;   // event score  -> confluence
+        sg_Level1.Arrays[1][i] = 0.0f;   // held  score  -> arrows
+        sg_DbgFire[i]          = 0.0f;
+    }
+
+    if (barsChanged && useLiveLatch)
+        sg_Level1.Arrays[2][lastBar] = 0.0f;
+
+    for (int ci = 0; ci < nDistinct; ++ci)
+    {
+        const int chartNum = distinctCharts[ci];
+
+        // Source DateTime array. Empty => chart closed / still loading; its
+        // triggers simply contribute nothing this pass (surfaced via SG6).
+        SCDateTimeArray srcDT;
+        sc.GetChartDateTimeArray(chartNum, srcDT);
+        const int nSrc = srcDT.GetArraySize();
+        if (nSrc < 2)
+            continue;
+
+        // ----- merge walk: destOfSrc[s] = main bar containing source bar s ----
+        // Mapped by source bar OPEN time (srcDT[s]). Monotonic cursor, never
+        // rewinds -> O(nSrc + nDest). -1 when the source bar predates main
+        // history. For chartNum == sc.ChartNumber this yields the identity map,
+        // reproducing the old same-chart read exactly.
+        std::vector<int> destOfSrc(nSrc);
+        {
+            int d = 0;
+            const SCDateTime firstMain = sc.BaseDateTimeIn[0];
+            for (int s = 0; s < nSrc; ++s)
+            {
+                while (d + 1 < totalBars && sc.BaseDateTimeIn[d + 1] <= srcDT[s])
+                    ++d;
+                destOfSrc[s] = (srcDT[s] < firstMain) ? -1 : d;
+            }
+        }
+
+        // First source bar whose event can land inside the pass window.
+        int srcStart = 1;
+        while (srcStart < nSrc && destOfSrc[srcStart] < windowStart)
+            ++srcStart;
+        if (srcStart < 1)
+            srcStart = 1;
+
+        // Closed source bars only, unless the forming source bar is opted in.
+        const int lastCountable = countFormingSrc ? (nSrc - 1) : (nSrc - 2);
+
+        for (int t = 0; t < 50; ++t)
+        {
+            if (!trigActive[t] || trigChart[t] != chartNum)
+                continue;
+
+            SCFloatArray& arr = trigData[t];
+            const int alen = arr.GetArraySize();
+            const float wt = static_cast<float>(trigWeight[t]);
+
+            int top = lastCountable;
+            if (top > alen - 1) top = alen - 1;
+
+            for (int s = srcStart; s <= top; ++s)
+            {
+                // Rising edge in SOURCE time: first bar the trigger goes
+                // non-zero. Every distinct event is seen at source resolution.
+                if (arr[s] == 0.0f || arr[s - 1] != 0.0f)
+                    continue;
+
+                const int spanStart = destOfSrc[s];
+                if (spanStart < 0)
+                    continue;                       // predates main history
+
+                // Where the event became KNOWABLE = source bar s's close =
+                // the open of source bar s+1.
+                int fireBar = (s + 1 < nSrc) ? destOfSrc[s + 1] : lastBar;
+                if (fireBar < 0)      fireBar = spanStart;
+                if (fireBar > lastBar) fireBar = lastBar;
+
+                // Open mode anchors to where the source bar STARTED instead.
+                const int eventBar = (fireMode == 0) ? spanStart : fireBar;
+
+                // ---- EVENT channel: exactly once, feeds the confluence sum ---
+                // Never spans. A source event is one event no matter how many
+                // main bars it covers; counting it per-bar is what inflated the
+                // rolling sum in V2 and let one trigger clear confluence alone.
+                if (eventBar >= windowStart && eventBar <= lastBar)
+                {
+                    sg_Level1.Arrays[0][eventBar] += wt;
+                    sg_DbgFire[eventBar]          += 1.0f;
+
+                    // Attribution: one row for this firing's primary bar. Covers
+                    // both channels here — in Open/Close the held write below
+                    // lands on this same eventBar, so a second row would just
+                    // duplicate it; in Hold, eventBar == b of the span loop
+                    // below, so it is excluded there instead of duplicated here.
+                    if (captureAttrib)
+                    {
+                        OFS5AttribRow row;
+                        row.destBar    = eventBar;
+                        row.triggerIdx = t;
+                        row.weight     = trigWeight[t];
+                        row.srcChart   = chartNum;
+                        row.srcStudy   = trigStudyID[t];
+                        row.srcSg      = trigSgIdx[t];
+                        row.srcDT      = srcDT[s];
+                        row.lagBars    = eventBar - spanStart;
+                        attribRows->push_back(row);
+                    }
+                }
+
+                // ---- HELD channel: feeds the arrow score --------------------
+                // Hold spreads the weight across every main bar the source bar
+                // covers, through to the bar where it became knowable, so a
+                // faster trigger firing anywhere inside that span can reach an
+                // arrow threshold together with it. Open/Close put the weight on
+                // the single event bar, identical to the event channel.
+                if (!holdMode)
+                {
+                    if (eventBar >= windowStart && eventBar <= lastBar)
+                        sg_Level1.Arrays[1][eventBar] += wt;
+                }
+                else
+                {
+                    int a = spanStart;
+                    int b = fireBar;                // inclusive: span + knowable bar
+                    if (b < a) b = a;               // source bar inside one main bar
+                    if (a < windowStart) a = windowStart;
+                    if (b > lastBar)     b = lastBar;
+                    for (int d = a; d <= b; ++d)
+                    {
+                        sg_Level1.Arrays[1][d] += wt;
+
+                        // Attribution: extra HELD-only rows for the rest of the
+                        // span (eventBar itself was already recorded above).
+                        if (captureAttrib && d != eventBar)
+                        {
+                            OFS5AttribRow row;
+                            row.destBar    = d;
+                            row.triggerIdx = t;
+                            row.weight     = trigWeight[t];
+                            row.srcChart   = chartNum;
+                            row.srcStudy   = trigStudyID[t];
+                            row.srcSg      = trigSgIdx[t];
+                            row.srcDT      = srcDT[s];
+                            row.lagBars    = d - spanStart;
+                            attribRows->push_back(row);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Live bar latch: the forming main bar's ARROW score never decreases within
+    // its life, so a source that flickers intrabar cannot make the arrow blink.
+    // Applied to the held channel because that is what drives arrows.
+    if (useLiveLatch)
+    {
+        if (sg_Level1.Arrays[2][lastBar] > sg_Level1.Arrays[1][lastBar])
+            sg_Level1.Arrays[1][lastBar] = sg_Level1.Arrays[2][lastBar];
+        else
+            sg_Level1.Arrays[2][lastBar] = sg_Level1.Arrays[1][lastBar];
+    }
+
+    // =========================================================================
+    // RENDER LOOP  (reads the precomputed score; pipeline identical to V4)
+    // =========================================================================
+    for (int i = windowStart; i < totalBars; ++i)
+    {
+        const bool isLast = (i == lastBar && i > 0);
+        const float score = sg_Level1.Arrays[0][i];
+
+        // ----- rolling confluence sum -----
+        const int sumStart = (i - lookback + 1 > 0) ? (i - lookback + 1) : 0;
+        float rollingSum = 0.0f;
+        for (int b = sumStart; b <= i; ++b)
+            rollingSum += sg_Level1.Arrays[0][b];
+
+        // ----- windowed arrow score (HELD channel) -----
+        // In Open/Close the held channel equals the event channel, so this is
+        // identical to V4. In Hold it carries each source event across its span.
+        const int awStart = (i - arrowWindow + 1 > 0) ? (i - arrowWindow + 1) : 0;
+        float arrowScore = 0.0f;
+        for (int b = awStart; b <= i; ++b)
+            arrowScore += sg_Level1.Arrays[1][b];
+
+        // ----- OTF filter: arrows -----
+        bool otfArrowPasses = true;
+        if (useOTFArrow)
+        {
+            auto checkOTF = [&](SCFloatArray& arr) -> bool {
+                if (arr.GetArraySize() == 0) return false;
+                if (i >= arr.GetArraySize())  return false;
+                return (arr[i] != 0.0f) ||
+                       (isLast && i > 0 && arr[i - 1] != 0.0f);
+            };
+            if (in_OTFArrowSlot1.GetStudyID() > 0 && !checkOTF(otfArrow1))
+                otfArrowPasses = false;
+            if (otfArrowPasses &&
+                in_OTFArrowSlot2.GetStudyID() > 0 && !checkOTF(otfArrow2))
+                otfArrowPasses = false;
+        }
+
+        // ----- OTF filter: confluence -----
+        bool otfConfPasses = true;
+        if (useOTFConf)
+        {
+            auto checkOTF = [&](SCFloatArray& arr) -> bool {
+                if (arr.GetArraySize() == 0) return false;
+                if (i >= arr.GetArraySize())  return false;
+                return (arr[i] != 0.0f) ||
+                       (isLast && i > 0 && arr[i - 1] != 0.0f);
+            };
+            if (in_OTFConfSlot1.GetStudyID() > 0 && !checkOTF(otfConf1))
+                otfConfPasses = false;
+            if (otfConfPasses &&
+                in_OTFConfSlot2.GetStudyID() > 0 && !checkOTF(otfConf2))
+                otfConfPasses = false;
+        }
+
+        // ----- fire level & confluence -----
+        int fireLevel = 0;
+        if (otfArrowPasses)
+        {
+            if      (arrowScore >= l3) fireLevel = 3;
+            else if (arrowScore >= l2) fireLevel = 2;
+            else if (arrowScore >= l1) fireLevel = 1;
+        }
+        const bool fireConfluence = otfConfPasses && (rollingSum >= ct);
+
+        // ----- Hold mode: one arrow per episode, not one per held bar --------
+        // The held weight sits on every bar of the span, so without this the
+        // same setup prints an arrow on all of them. Suppress while the level is
+        // unchanged or lower than the previous bar; allow an upgrade to a higher
+        // tier to print. Not applied in Open/Close, where consecutive-bar arrows
+        // are genuinely separate events.
+        if (holdMode && fireLevel > 0 && i > 0)
+        {
+            int prevLevel = 0;
+            if      (sg_Level3[i - 1] != 0.0f) prevLevel = 3;
+            else if (sg_Level2[i - 1] != 0.0f) prevLevel = 2;
+            else if (sg_Level1[i - 1] != 0.0f) prevLevel = 1;
+
+            if (fireLevel <= prevLevel)
+                fireLevel = 0;
+        }
+
+        // ----- arrow Y placement -----
+        float arrowPrice = 0.0f;
+        if (fireLevel > 0)
+        {
+            if (subpanel)
+                arrowPrice = static_cast<float>(fireLevel);
+            else
+                arrowPrice = (position == 0) ? (sc.Low[i]  - offset)
+                                             : (sc.High[i] + offset);
+        }
+
+        // ----- write subgraphs -----
+        sg_Level1[i]     = (fireLevel == 1) ? arrowPrice : 0.0f;
+        sg_Level2[i]     = (fireLevel == 2) ? arrowPrice : 0.0f;
+        sg_Level3[i]     = (fireLevel == 3) ? arrowPrice : 0.0f;
+        sg_Confluence[i] = fireConfluence ? 1.0f : 0.0f;
+
+        sg_Score[i]   = score;                              // event score
+        sg_Held[i]    = sg_Level1.Arrays[1][i];             // held score (arrows)
+        sg_DbgConn[i] = static_cast<float>(totalConnected);
+        // sg_DbgFire[i] already holds this bar's accumulated event count.
+
+        if      (arrowScore >= l3) sg_Score.DataColor[i] = sg_Level3.PrimaryColor;
+        else if (arrowScore >= l2) sg_Score.DataColor[i] = sg_Level2.PrimaryColor;
+        else if (arrowScore >= l1) sg_Score.DataColor[i] = sg_Level1.PrimaryColor;
+        else                       sg_Score.DataColor[i] = sg_Score.PrimaryColor;
+    }
+
+    // =========================================================================
+    // ALERTS  (membership dedup — identical to V4)
+    // =========================================================================
+    int& alertBaseBar  = sc.GetPersistentInt(6);
+    int& sigAlertMask  = sc.GetPersistentInt(7);
+    int& confAlertMask = sc.GetPersistentInt(8);
+
+    if (lastBar > alertBaseBar)
+    {
+        const int shift = lastBar - alertBaseBar;
+        if (shift >= 32)
+        {
+            sigAlertMask  = 0;
+            confAlertMask = 0;
+        }
+        else
+        {
+            sigAlertMask  = static_cast<int>(static_cast<unsigned int>(sigAlertMask)  >> shift);
+            confAlertMask = static_cast<int>(static_cast<unsigned int>(confAlertMask) >> shift);
+        }
+        alertBaseBar = lastBar;
+    }
+    else if (lastBar < alertBaseBar)
+    {
+        alertBaseBar  = lastBar;
+        sigAlertMask  = -1;
+        confAlertMask = -1;
+    }
+
+    if (isFullRecalc)
+    {
+        sigAlertMask  = -1;
+        confAlertMask = -1;
+
+        // Attribution export — written here because this is the one place in
+        // the function that is BOTH inside `isFullRecalc` (so it runs once per
+        // full recalc, never per tick) AND after the render loop (so fire
+        // levels / final scores exist to read). See banner comment for schema.
+        if (exportEnabled && attribRows != NULL)
+            OFS5WriteAttributionCSV(sc, "long", in_AttribPath, in_AttribAppend,
+                fireMode, *attribRows, sg_Level1, sg_Level2, sg_Level3);
+
+        return;
+    }
+
+    const int ALERT_SCAN_BARS = 32;
+    int scanFloor = totalBars - ALERT_SCAN_BARS;
+    if (scanFloor < 0) scanFloor = 0;
+
+    if (sigSound > 0)
+    {
+        for (int b = lastBar; b >= scanFloor; --b)
+        {
+            const int k = alertBaseBar - b;
+            if (k < 0 || k >= 32)          continue;
+            if (sigAlertMask & (1 << k))   continue;
+
+            int level = 0;
+            if      (sg_Level3[b] != 0.0f) level = 3;
+            else if (sg_Level2[b] != 0.0f) level = 2;
+            else if (sg_Level1[b] != 0.0f) level = 1;
+
+            if (level > 0)
+            {
+                SCString msg;
+                msg.Format("Orderflow Signal L%d (%d bar(s) back)", level, lastBar - b);
+                sc.SetAlert(sigSound, lastBar, msg);
+                sigAlertMask |= (1 << k);
+                break;
+            }
+        }
+    }
+
+    if (confSound > 0)
+    {
+        for (int b = lastBar; b >= scanFloor; --b)
+        {
+            const int k = alertBaseBar - b;
+            if (k < 0 || k >= 32)          continue;
+            if (confAlertMask & (1 << k))  continue;
+
+            const bool onset = (sg_Confluence[b] > 0.5f) &&
+                               (b == 0 || sg_Confluence[b - 1] < 0.5f);
+            if (onset)
+            {
+                SCString msg;
+                msg.Format("Orderflow Confluence Zone (%d bar(s) back)", lastBar - b);
+                sc.SetAlert(confSound, lastBar, msg);
+                confAlertMask |= (1 << k);
+                break;
+            }
+        }
+    }
+}
